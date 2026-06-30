@@ -118,37 +118,52 @@ CLI 报告的完整清单(`model/codebuddy/models.go` 里有导出常量):
 
 ---
 
-## 4b. ⚠️ 网关返回的 token usage 不可信(带 tools 时严重虚高)
+## 4b. ⚠️ 网关返回的 token usage 不可信(带 tools 时有固定虚高加项)
 
-> 2026-06-30 抓包实测发现。**这是采用 CodeBuddy Provider 的一个重大隐患,未来可能因此放弃该 Provider。**
+> 2026-06-30 抓包 + 多模型对照实测。**这是采用 CodeBuddy Provider 的一个重大隐患,未来可能因此放弃该 Provider。**
+>
+> 说明:本节结论经过修正。初次只测了 claude-sonnet 单点,误判为"虚高 ~68 倍且随轮次放大";补做多模型 / 多轮控制实验后,真相更精确(见下)。
 
-**现象**:CodeBuddy 网关对 **Claude 系模型 + 带 `tools`(function calling)** 的请求,返回的 `prompt_tokens` 严重虚高,且随对话轮次放大。框架(`model/codebuddy` / `model/openai`)只是**如实透传**网关返回的 usage,本身没有 bug——是网关的计费/统计口径有问题。
+**现象**:CodeBuddy 网关对 **Claude 系模型 + 带 `tools`(function calling)** 的请求,会在 `prompt_tokens` 里凭空加上**一个 ~575 token 的固定项**。框架(`model/codebuddy` / `model/openai`)只是**如实透传**网关返回的 usage,本身没有 bug——失真发生在网关侧(疑似 Anthropic 协议转换层把注入的工具说明/系统提示计入了 prompt_tokens)。
 
-**决定性对照实验**(裸 curl,`claude-sonnet-4.6`,排除框架因素):
+**本质:是"固定加项",不是"按比例放大"。**
+- **无 tools 时所有模型都准确**(报 6~15 token,符合 ~13 token 估算)。
+- 一旦带上同一个极小工具 schema,Claude 系**凭空 +575 左右**,且这是个**常量**——不随对话长度按比例增长,每轮都加这一坨。
+- 所以"虚高倍数"随轮次反而**下降**(固定项被真实内容摊薄):claude 单轮 7.2x → 3 轮 3.2x。初次看到的 15675→33852 增长,其实是"固定加项 + 正常的仅追加增长",不是膨胀失控。
 
-| 请求 | 网关报 prompt_tokens | 合理估算 |
-|------|---------------------|---------|
-| `"hi"` 无 tools | **8** | ✅ 准确 |
-| `"hi"` + 一个极小工具 schema(~40 tok) | **547** | ❌ 虚高 ~68 倍 |
-| 同请求换 `glm-5.0` | **147** | 虚高但程度小得多 |
+**模型族差异巨大(同一网关,同一请求)**:
 
-**多轮放大**(真实请求体 vs 网关报数,带 1 个 calculator 工具):
+| 等级 | 模型 | 带 tools 的固定加项 | 单轮失真 |
+|------|------|---------------------|---------|
+| 🔴 严重 | **Claude 全系**(sonnet-4.6 / haiku-4.5 / opus-4.6) | **+~575**(三型号数字几乎一字不差:588/587/588) | ~7x |
+| 🟠 中等 | `deepseek-v3-2-volc` | +~245 | ~4x |
+| 🟡 轻微 | `glm-5.0` | +~100 | ~2x |
+| 🟢 基本正常 | `kimi-k2.5` / `gpt-5.5` / `gemini-3.1-pro` | +20~45 | <1x |
 
-| LLM 请求 | 真实请求体(实测 dump) | 网关报 prompt_tokens |
-|------|----------------------|---------------------|
-| #1 | 1460 B(≈400 tok) | **15675** |
-| #2 | 1820 B | **17936** |
-| #3 | 2214 B | **23496** |
-| #4 | 2602 B(≈700 tok) | **33852** |
+> Claude 三个型号加项完全相同,强烈暗示是网关在协议转换层统一注入了固定内容并计入 prompt,而非真实计费。
+> (注:`claude-opus-4.8` 在该 key/环境下 baseline 即 HTTP 500,模型本身不稳,未纳入;`opus-4.6` 行为与其它 Claude 一致。)
+
+**控制实验数据**(裸 curl,排除框架,`max_tokens=128`,estTok=请求字节/4 的粗估):
+
+```
+model                  scenario              estTok  gwPrompt  inflate
+claude-sonnet-4.6      A baseline(no tools)      13        15     1.2x
+claude-sonnet-4.6      B +tools(1 turn)          82       588     7.2x
+claude-sonnet-4.6      C turn 1/2/3            84/172/260  591/718/845  7.0→3.2x
+glm-5.0                B +tools(1 turn)          82       182     2.2x
+deepseek-v3-2-volc     B +tools(1 turn)          82       327     4.0x
+gemini-3.1-pro         B +tools(1 turn)          82        33     0.4x
+gpt-5.5                B +tools(1 turn)          82        53     0.6x
+```
 
 **影响**:
-- **任何依赖网关 usage 的成本核算 / 配额监控 / token 预算决策都会被严重误导**(虚高几十倍)。
-- token tailoring(`model/token_tailor.go` 按 token 预算裁剪)若用网关 usage 反馈做判断,会被骗。所幸框架的 tailoring 用的是**本地** `TokenCounter` 估算,不读网关 usage,暂不受影响。
-- 上下文本身没问题:实测请求体证明框架是标准"仅追加"拼接,每轮只增 ~370 B(见 §6 设计要点)。膨胀可控,虚高纯粹来自网关计数。
+- **依赖网关 usage 的成本核算 / 配额监控 / token 预算决策会被误导**——尤其 Claude + 工具调用 + 短对话场景失真最重(~7x)。用 gemini/gpt/kimi 则 usage 基本可用。
+- token tailoring(`model/token_tailor.go` 按 token 预算裁剪)若用网关 usage 反馈会被骗。所幸框架 tailoring 用的是**本地** `TokenCounter` 估算,不读网关 usage,不受影响。
+- 上下文拼接本身没问题:实测请求体证明框架是标准"仅追加"`[system][user][asst][tool]...`,每轮只增 ~370 B(见 §6)。虚高纯粹来自网关计数。
 
-**怎么自查**:用 `openai.WithChatRequestJSONCallback` dump 真实请求体字节数,跟 `response.Usage.PromptTokens` 对比。请求体几 KB 却报上万 token,即网关虚高。
+**怎么自查**:用 `openai.WithChatRequestJSONCallback` dump 真实请求体字节数,跟 `response.Usage.PromptTokens` 对比;或对同一模型做"无 tools vs 带 tools"两次最小请求,看 prompt 是否凭空跳几百。
 
-**结论与取舍**:CodeBuddy 网关在带 tools 场景下 usage 不可信。短期:**不要用网关 usage 做任何计量/计费**,需要 token 统计就用本地 `TokenCounter` 估算。长期:这是评估是否放弃 CodeBuddy Provider、改走更可信后端(如直连 Venus/太极 OpenAI 兼容端点)的一个重要砝码。
+**结论与取舍**:CodeBuddy 网关在 **Claude + tools** 场景下 usage 严重失真,其它模型族影响递减。短期:**不要用网关 usage 做计量/计费**(尤其 Claude),需要 token 统计就用本地 `TokenCounter` 估算。长期:这是评估是否放弃 CodeBuddy Provider、改走更可信后端(如直连 Venus/太极 OpenAI 兼容端点)的一个重要砝码。
 
 ---
 

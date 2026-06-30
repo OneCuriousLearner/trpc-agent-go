@@ -101,7 +101,7 @@ Claude Code 把上下文管理做成一条**正交、可组合、分级触发**�
 
 ## T2 — CodeBuddy Provider 可信度评估 `[?]`
 
-- 详见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b:网关带 tools 时 usage 严重虚高。
+- 详见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b:网关带 tools 时 usage 失真(Claude 系有 ~575 token 固定加项;模型族差异大,gemini/gpt/kimi 基本正常)。
 - [?] 决策:是否继续采用 CodeBuddy Provider,还是改走更可信的 OpenAI 兼容后端(Venus / 太极等)。
 - [ ] 若保留:在文档/代码注释里明确警告"勿用网关 usage 计量"。
 
