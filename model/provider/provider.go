@@ -17,6 +17,7 @@ import (
 
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/model/anthropic"
+	"trpc.group/trpc-go/trpc-agent-go/model/codebuddy"
 	"trpc.group/trpc-go/trpc-agent-go/model/gemini"
 	"trpc.group/trpc-go/trpc-agent-go/model/hunyuan"
 	"trpc.group/trpc-go/trpc-agent-go/model/ollama"
@@ -29,6 +30,7 @@ func init() {
 	Register("gemini", geminiProvider)
 	Register("ollama", ollamaProvider)
 	Register("hunyuan", hunyuanProvider)
+	Register("codebuddy", codebuddyProvider)
 }
 
 // Provider builds a model.Model instance.
@@ -328,4 +330,101 @@ func hunyuanProvider(opts *Options) (model.Model, error) {
 	}
 	res = append(res, opts.HunyuanOption...)
 	return hunyuan.New(opts.ModelName, res...), nil
+}
+
+// codebuddyProvider builds a CodeBuddy gateway model instance using the resolved
+// options. The CodeBuddy gateway is OpenAI-compatible, so generic OpenAI-shaped
+// options are forwarded to the underlying openai.Model via WithOpenAIOptions.
+func codebuddyProvider(opts *Options) (model.Model, error) {
+	var res []codebuddy.Option
+	if opts.APIKey != "" {
+		res = append(res, codebuddy.WithAPIKey(opts.APIKey))
+	}
+	if opts.BaseURL != "" {
+		res = append(res, codebuddy.WithBaseURL(opts.BaseURL))
+	}
+	if len(opts.Headers) > 0 {
+		res = append(res, codebuddy.WithHeaders(opts.Headers))
+	}
+	if oaOpts := codeBuddyOpenAIOptions(opts); len(oaOpts) > 0 {
+		res = append(res, codebuddy.WithOpenAIOptions(oaOpts...))
+	}
+	return codebuddy.New(opts.ModelName, res...), nil
+}
+
+// codeBuddyOpenAIOptions maps the generic OpenAI-shaped fields of Options onto
+// raw openai.Option values for the CodeBuddy provider's embedded openai.Model.
+func codeBuddyOpenAIOptions(opts *Options) []openai.Option {
+	var oaOpts []openai.Option
+	if opts.Variant != "" {
+		oaOpts = append(oaOpts, openai.WithVariant(openai.Variant(opts.Variant)))
+	}
+	if httpOpts := codeBuddyHTTPOptions(opts); len(httpOpts) > 0 {
+		oaOpts = append(oaOpts, openai.WithHTTPClientOptions(httpOpts...))
+	}
+	oaOpts = appendCodeBuddyCallbacks(oaOpts, opts.Callbacks)
+	if opts.ChannelBufferSize != nil {
+		oaOpts = append(oaOpts, openai.WithChannelBufferSize(*opts.ChannelBufferSize))
+	}
+	if len(opts.ExtraFields) > 0 {
+		oaOpts = append(oaOpts, openai.WithExtraFields(opts.ExtraFields))
+	}
+	oaOpts = appendCodeBuddyTailoring(oaOpts, opts)
+	oaOpts = append(oaOpts, opts.OpenAIOption...)
+	return oaOpts
+}
+
+// codeBuddyHTTPOptions collects HTTP client options from Options.
+func codeBuddyHTTPOptions(opts *Options) []openai.HTTPClientOption {
+	var httpOpts []openai.HTTPClientOption
+	if opts.HTTPClientName != "" {
+		httpOpts = append(httpOpts, openai.WithHTTPClientName(opts.HTTPClientName))
+	}
+	if opts.HTTPClientTransport != nil {
+		httpOpts = append(httpOpts, openai.WithHTTPClientTransport(opts.HTTPClientTransport))
+	}
+	return httpOpts
+}
+
+// appendCodeBuddyCallbacks appends the OpenAI-shaped callbacks, if any.
+func appendCodeBuddyCallbacks(oaOpts []openai.Option, cb *Callbacks) []openai.Option {
+	if cb == nil {
+		return oaOpts
+	}
+	if cb.OpenAIChatRequest != nil {
+		oaOpts = append(oaOpts, openai.WithChatRequestCallback(cb.OpenAIChatRequest))
+	}
+	if cb.OpenAIChatResponse != nil {
+		oaOpts = append(oaOpts, openai.WithChatResponseCallback(cb.OpenAIChatResponse))
+	}
+	if cb.OpenAIChatChunk != nil {
+		oaOpts = append(oaOpts, openai.WithChatChunkCallback(cb.OpenAIChatChunk))
+	}
+	if cb.OpenAIStreamComplete != nil {
+		oaOpts = append(oaOpts, openai.WithChatStreamCompleteCallback(cb.OpenAIStreamComplete))
+	}
+	return oaOpts
+}
+
+// appendCodeBuddyTailoring appends token-tailoring related options.
+func appendCodeBuddyTailoring(oaOpts []openai.Option, opts *Options) []openai.Option {
+	if opts.EnableTokenTailoring != nil {
+		oaOpts = append(oaOpts, openai.WithEnableTokenTailoring(*opts.EnableTokenTailoring))
+	}
+	if opts.MaxInputTokens != nil {
+		oaOpts = append(oaOpts, openai.WithMaxInputTokens(*opts.MaxInputTokens))
+	}
+	if opts.ContextWindow != nil {
+		oaOpts = append(oaOpts, openai.WithContextWindow(*opts.ContextWindow))
+	}
+	if opts.TokenCounter != nil {
+		oaOpts = append(oaOpts, openai.WithTokenCounter(opts.TokenCounter))
+	}
+	if opts.TailoringStrategy != nil {
+		oaOpts = append(oaOpts, openai.WithTailoringStrategy(opts.TailoringStrategy))
+	}
+	if opts.TokenTailoringConfig != nil {
+		oaOpts = append(oaOpts, openai.WithTokenTailoringConfig(opts.TokenTailoringConfig))
+	}
+	return oaOpts
 }
