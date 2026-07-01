@@ -284,6 +284,20 @@ type CompletionTokensDetails struct {
 
 对于 OpenAI-compatible 服务，返回中的 `completion_tokens_details.reasoning_tokens` 会映射到 `Usage.CompletionTokensDetails.ReasoningTokens`。当服务方没有消耗或没有上报 reasoning tokens 时，该值可能为 `0`；如果希望 reasoning 模型进入推理行为，请按模型能力设置 `ReasoningEffort` 和/或 `ThinkingEnabled`。
 
+#### 流式 usage 聚合(默认 take-last)
+
+流式响应里，token usage 是**累计快照**(每次上报的都是"到目前为止的总量"),不是每个 chunk 的增量。因此 OpenAI Model 默认采用 **take-last**:以最后一个携带 usage 的 chunk 为准。
+
+> **行为变更提示**:此前默认是把各 chunk 的 usage **累加**(sum)。对**标准 OpenAI 兼容接口无影响**——合规服务的 usage 只在末尾上报一次,take-last 与累加结果相同。该变更只修正了"每个 chunk 都重复上报完整 usage"的非标准网关(此前会被累加成数倍虚高)。
+
+如需恢复旧的累加行为:
+
+```go
+m := openai.New("model-name", openai.WithStreamUsageTakeLast(false))
+```
+
+`WithAccumulateChunkTokenUsage`(自定义累加回调)优先级高于本开关。
+
 ## OpenAI Model
 
 ### 模型名称参数

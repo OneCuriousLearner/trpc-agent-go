@@ -286,6 +286,20 @@ type CompletionTokensDetails struct {
 
 For OpenAI-compatible providers, `completion_tokens_details.reasoning_tokens` is mapped to `Usage.CompletionTokensDetails.ReasoningTokens`. The value may be `0` when the provider does not spend or report reasoning tokens; for reasoning models, set `ReasoningEffort` and/or `ThinkingEnabled` when you want to request reasoning behavior.
 
+#### Streaming usage aggregation (take-last by default)
+
+In streaming responses, token usage is a **cumulative snapshot** (each report is the running total so far), not a per-chunk delta. The OpenAI Model therefore defaults to **take-last**: the last usage-bearing chunk wins.
+
+> **Behavior change note:** the previous default **summed** usage across chunks. This has **no effect on standard OpenAI-compatible endpoints** — compliant providers emit usage only once at the end, so take-last equals the old sum. The change only fixes non-standard gateways that repeat the full usage on every chunk (which were previously summed into an inflated total).
+
+To restore the old summation behavior:
+
+```go
+m := openai.New("model-name", openai.WithStreamUsageTakeLast(false))
+```
+
+`WithAccumulateChunkTokenUsage` (a custom accumulation callback) takes precedence over this switch.
+
 ## OpenAI Model
 
 ### Model Name Parameter

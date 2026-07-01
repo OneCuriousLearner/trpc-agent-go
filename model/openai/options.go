@@ -416,6 +416,11 @@ func WithAccumulateChunkTokenUsage(a AccumulateChunkUsage) Option {
 //
 // This option has no effect when WithAccumulateChunkTokenUsage is set, which
 // takes precedence.
+//
+// Changed default: streaming usage aggregation was previously sum-based. It is
+// now take-last by default. Standard OpenAI-compatible endpoints are unaffected
+// (they emit usage once, so take-last == the old sum); pass false here to
+// restore the old summation explicitly.
 func WithStreamUsageTakeLast(takeLast bool) Option {
 	return func(opts *options) {
 		opts.StreamUsageTakeLast = takeLast
