@@ -9349,3 +9349,133 @@ func TestModel_GenerateContentIter_EmbeddedErrorHTTP200(t *testing.T) {
 	assert.Equal(t, model.ErrorTypeAPIError, resp.Error.Type)
 	assert.True(t, resp.Done)
 }
+
+// newRepeatedUsageStreamServer returns a test server that emits a streaming
+// response where EVERY content chunk repeats the full cumulative usage (as some
+// non-standard gateways do). prompt stays constant; completion is a cumulative
+// snapshot that grows to finalCompletion on the final (finish_reason) chunk.
+func newRepeatedUsageStreamServer(t *testing.T, prompt, finalCompletion int) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.Header().Set("Cache-Control", "no-cache")
+		flusher, _ := w.(http.Flusher)
+		emit := func(s string) {
+			fmt.Fprintf(w, "%s\n\n", s)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(time.Millisecond)
+		}
+		// finalCompletion content chunks, each carrying a cumulative usage
+		// snapshot with the SAME prompt and a growing completion count.
+		for i := 1; i <= finalCompletion; i++ {
+			emit(fmt.Sprintf(
+				`data: {"id":"rep","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"x"},"finish_reason":null}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
+				prompt, i, prompt+i,
+			))
+		}
+		// Final finish chunk repeats the same cumulative usage once more.
+		emit(fmt.Sprintf(
+			`data: {"id":"rep","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":%d,"completion_tokens":%d,"total_tokens":%d}}`,
+			prompt, finalCompletion, prompt+finalCompletion,
+		))
+		emit(`data: [DONE]`)
+	}))
+}
+
+func streamFinalUsage(t *testing.T, m *Model) *model.Usage {
+	t.Helper()
+	req := &model.Request{
+		Messages:         []model.Message{model.NewUserMessage("hi")},
+		GenerationConfig: model.GenerationConfig{Stream: true},
+	}
+	ch, err := m.GenerateContent(context.Background(), req)
+	require.NoError(t, err)
+	var last *model.Usage
+	for resp := range ch {
+		if resp != nil && resp.Usage != nil {
+			last = resp.Usage
+		}
+	}
+	return last
+}
+
+// TestModel_Streaming_RepeatedUsagePerChunk_TakeLast verifies that, with the
+// default take-last behavior, a gateway that repeats cumulative usage on every
+// chunk is aggregated to the final snapshot rather than summed N times.
+func TestModel_Streaming_RepeatedUsagePerChunk_TakeLast(t *testing.T) {
+	const prompt, finalCompletion = 14, 11
+	server := newRepeatedUsageStreamServer(t, prompt, finalCompletion)
+	defer server.Close()
+
+	m := New("m", WithBaseURL(server.URL), WithAPIKey("test-key")) // take-last is default
+	usage := streamFinalUsage(t, m)
+
+	require.NotNil(t, usage)
+	assert.Equal(t, prompt, usage.PromptTokens,
+		"prompt should be the last snapshot (14), not summed across chunks")
+	assert.Equal(t, finalCompletion, usage.CompletionTokens,
+		"completion should be the last cumulative snapshot (11), not summed")
+	assert.Equal(t, prompt+finalCompletion, usage.TotalTokens)
+}
+
+// TestModel_Streaming_RepeatedUsage_TakeLastDisabled verifies the option can be
+// turned off to restore the legacy summation behavior.
+func TestModel_Streaming_RepeatedUsage_TakeLastDisabled(t *testing.T) {
+	const prompt, finalCompletion = 14, 11
+	server := newRepeatedUsageStreamServer(t, prompt, finalCompletion)
+	defer server.Close()
+
+	m := New("m", WithBaseURL(server.URL), WithAPIKey("test-key"),
+		WithStreamUsageTakeLast(false))
+	usage := streamFinalUsage(t, m)
+
+	require.NotNil(t, usage)
+	// Legacy: prompt is summed across all usage-bearing chunks (finalCompletion
+	// content chunks + 1 finish chunk = finalCompletion+1 repeats).
+	repeats := finalCompletion + 1
+	assert.Equal(t, prompt*repeats, usage.PromptTokens,
+		"with take-last disabled, prompt is summed across chunks (legacy)")
+	assert.Greater(t, usage.PromptTokens, prompt,
+		"legacy summation must inflate beyond the true single value")
+}
+
+// TestModel_Streaming_StandardUsageOnce_Unchanged verifies that a compliant
+// provider (usage only on the final chunk) is unaffected by take-last.
+func TestModel_Streaming_StandardUsageOnce_Unchanged(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasSuffix(r.URL.Path, "/chat/completions") {
+			http.Error(w, "not found", http.StatusNotFound)
+			return
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher, _ := w.(http.Flusher)
+		emit := func(s string) {
+			fmt.Fprintf(w, "%s\n\n", s)
+			if flusher != nil {
+				flusher.Flush()
+			}
+			time.Sleep(time.Millisecond)
+		}
+		// Content chunks WITHOUT usage.
+		emit(`data: {"id":"std","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"role":"assistant","content":"hel"},"finish_reason":null}]}`)
+		emit(`data: {"id":"std","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{"content":"lo"},"finish_reason":null}]}`)
+		// Final chunk carries usage exactly once (standard behavior).
+		emit(`data: {"id":"std","object":"chat.completion.chunk","created":1,"model":"m","choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":20,"completion_tokens":5,"total_tokens":25}}`)
+		emit(`data: [DONE]`)
+	}))
+	defer server.Close()
+
+	m := New("m", WithBaseURL(server.URL), WithAPIKey("test-key")) // take-last default
+	usage := streamFinalUsage(t, m)
+
+	require.NotNil(t, usage)
+	assert.Equal(t, 20, usage.PromptTokens)
+	assert.Equal(t, 5, usage.CompletionTokens)
+	assert.Equal(t, 25, usage.TotalTokens)
+}

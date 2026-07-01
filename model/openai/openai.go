@@ -262,6 +262,7 @@ type Model struct {
 	maxInputTokensRatio    float64
 
 	accumulateChunkUsage AccumulateChunkUsage
+	streamUsageTakeLast  bool // Take-last (cumulative snapshot) streaming usage aggregation; robust to per-chunk-repeated usage.
 	optimizeForCache     bool // Optimize message structure for prompt caching
 	omitFileContentParts bool
 }
@@ -345,6 +346,7 @@ func New(name string, opts ...Option) *Model {
 		safetyMarginRatio:          o.TokenTailoringConfig.SafetyMarginRatio,
 		maxInputTokensRatio:        o.TokenTailoringConfig.MaxInputTokensRatio,
 		accumulateChunkUsage:       o.accumulateChunkUsage,
+		streamUsageTakeLast:        o.StreamUsageTakeLast,
 		optimizeForCache:           o.OptimizeForCache,
 		omitFileContentParts:       o.OmitFileContentParts,
 	}
@@ -1619,6 +1621,11 @@ func hasAccumulatorPayloadBeyondReasoning(
 		}
 	}
 
+	return chunkHasUsage(chunk)
+}
+
+// chunkHasUsage reports whether a streaming chunk carries any token usage.
+func chunkHasUsage(chunk openai.ChatCompletionChunk) bool {
 	return chunk.Usage.CompletionTokens > 0 ||
 		chunk.Usage.PromptTokens > 0 ||
 		chunk.Usage.TotalTokens > 0
@@ -1853,15 +1860,30 @@ func (m *Model) accumulateChunk(
 		// avoid known panics when JSON.ToolCalls is marked present but the
 		// typed ToolCalls slice is empty, especially on finish_reason chunks.
 		sanitizedChunk := sanitizeChunkForAccumulator(chunkForAccumulator)
-		if acc.AddChunk(sanitizedChunk) {
-			applyOpenAISDKTokenDetailsAccumulationFix(acc, chunk)
-		}
+		added := acc.AddChunk(sanitizedChunk)
 
-		if m.accumulateChunkUsage != nil {
+		switch {
+		case m.accumulateChunkUsage != nil:
+			// Custom accumulation hook takes precedence over both take-last and
+			// the default SDK summation.
 			accUsage, chunkUsage := completionUsageToModelUsage(acc.Usage), completionUsageToModelUsage(chunk.Usage)
 			usage := inverseOpenAISDKAddChunkUsage(accUsage, chunkUsage)
 			usage = m.accumulateChunkUsage(usage, chunkUsage)
 			acc.Usage = modelUsageToCompletionUsage(usage)
+		case m.streamUsageTakeLast:
+			// Protocol-correct default: streaming usage is a cumulative snapshot,
+			// so the last usage-bearing chunk wins. Overwrite the SDK's summed
+			// value to stay correct even when a gateway repeats the full usage on
+			// every chunk (which the SDK would otherwise add N times). Overwriting
+			// with the whole chunk usage also supersedes the token-details
+			// accumulation workaround, so it is only needed in the legacy path.
+			if chunkHasUsage(chunk) {
+				acc.Usage = chunk.Usage
+			}
+		case added:
+			// Legacy behavior: SDK sums usage across chunks; patch the token
+			// detail fields the SDK version does not accumulate itself.
+			applyOpenAISDKTokenDetailsAccumulationFix(acc, chunk)
 		}
 	}
 
