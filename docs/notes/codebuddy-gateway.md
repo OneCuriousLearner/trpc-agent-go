@@ -118,11 +118,11 @@ CLI 报告的完整清单(`model/codebuddy/models.go` 里有导出常量):
 
 ---
 
-## 4b. ⚠️ 网关返回的 token usage 不可信(带 tools 时有固定虚高加项)
+## 4b. ⚠️ 网关返回的 token usage 不可信(网关协议 bug + 框架累加 bug 叠加)
 
-> 2026-06-30 抓包 + 多模型对照实测。**这是采用 CodeBuddy Provider 的一个重大隐患,未来可能因此放弃该 Provider。**
+> 2026-06-30 抓包 + 多模型对照 + 流式深挖实测。**这是采用 CodeBuddy Provider 的一个重大隐患,未来可能因此放弃该 Provider。**
 >
-> 说明:本节结论经过修正。初次只测了 claude-sonnet 单点,误判为"虚高 ~68 倍且随轮次放大";补做多模型 / 多轮控制实验后,真相更精确(见下)。
+> 说明:本节结论经过**两次**修正。初次只测 claude 单点,误判"虚高 68 倍且随轮次放大";第二次用非流式 curl 多模型控制实验,得出"固定加项 ~575";第三次深挖**流式**路径(框架实际走的),才找到真凶——见 §4b-2。三次数据都保留,便于理解排查过程。
 
 **现象**:CodeBuddy 网关对 **Claude 系模型 + 带 `tools`(function calling)** 的请求,会在 `prompt_tokens` 里凭空加上**一个 ~575 token 的固定项**。框架(`model/codebuddy` / `model/openai`)只是**如实透传**网关返回的 usage,本身没有 bug——失真发生在网关侧(疑似 Anthropic 协议转换层把注入的工具说明/系统提示计入了 prompt_tokens)。
 
@@ -160,6 +160,24 @@ gpt-5.5                B +tools(1 turn)          82        53     0.6x
 - **依赖网关 usage 的成本核算 / 配额监控 / token 预算决策会被误导**——尤其 Claude + 工具调用 + 短对话场景失真最重(~7x)。用 gemini/gpt/kimi 则 usage 基本可用。
 - token tailoring(`model/token_tailor.go` 按 token 预算裁剪)若用网关 usage 反馈会被骗。所幸框架 tailoring 用的是**本地** `TokenCounter` 估算,不读网关 usage,不受影响。
 - 上下文拼接本身没问题:实测请求体证明框架是标准"仅追加"`[system][user][asst][tool]...`,每轮只增 ~370 B(见 §6)。虚高纯粹来自网关计数。
+
+### 4b-2. 更深层根因:流式路径下的"每 chunk 重复 usage × SDK 累加"(2026-06-30 补测,修正上文)
+
+上面的"固定加项 ~575"是用**非流式 curl** 测到的网关侧现象。但框架实际走的是**流式**(CodeBuddy 网关只支持 stream),流式路径下还叠加了一个**框架侧的健壮性 bug**,两者共同造成了 benchmark 里那种天文数字(单步 in-token 报到 **670 万**)。
+
+**根因链(实测坐实)**:
+1. **CodeBuddy 违反 OpenAI 流式协议**:标准协议里 usage 只在**最后一个 chunk**出现一次(前面的 chunk `usage=null`);而 CodeBuddy **几乎每个 chunk 都重复携带完整 usage**。实测:一个 20-chunk 的流,**19 个 chunk 都带 `prompt_tokens:562`**(同一值重复 19 次)。DeepSeek 对照:232 chunk 只有 **1 个**带 usage。
+2. **OpenAI SDK 累加器无条件 `+=` 每个 chunk 的 usage**:`streamaccumulator.go` 的 `accumulateDelta` 里 `cc.Usage.PromptTokens += chunk.Usage.PromptTokens`(对 Completion/Total 同样)。在标准协议下这没问题(只加末尾那一次);遇到 CodeBuddy 每 chunk 重复 usage,就把 562 累加了 ~19 次。
+3. **只在带 tools 时爆发**:实测框架跑 CodeBuddy 流式,`no-tools` prompt=198(✅ 准确),`with-tools` prompt=**6479**(真实应 ~560,虚高 ~11.5x)。带 tools 时 chunk 更多、几乎每个都重复 usage,累加倍数≈chunk 数;多轮时逐次滚雪球到几十万/几百万。两种情况框架最终都只吐 **1 个** usage event,所以虚高发生在 **SDK accumulator 内部**,不是框架吐多次。
+
+**结论修正**:不是"网关数字本身离谱到 670万",单 chunk 的 562 是合理的。真凶是 **CodeBuddy 协议 bug(每 chunk 重复 usage)+ 框架/SDK 对非标准流式不设防(无条件累加)**。这意味着:
+- 之前"框架只是如实透传、本身无 bug"的说法**不准确**——框架在流式 usage 累加上对非标准网关**不鲁棒**,这是个**可修复的框架健壮性缺陷**(见 TODO T4)。
+- 修复方向:流式累加时对 usage 做"取最后一次 / 去重"而非无条件 `+=`,或识别"每 chunk 重复的相同 usage"并只计一次。
+- DeepSeek usage 正确的真正原因是它**遵循标准协议**(usage 仅末尾一次),与流式/非流式无关。
+
+**自查升级版**:除了对比请求体字节,还可直接数流式 chunk:`curl ... -N | grep -c '"prompt_tokens"'`。标准应为 1;若等于 chunk 数,即"每 chunk 重复 usage"型网关,框架累加会虚高。
+
+**原"影响"结论仍成立**:
 
 **怎么自查**:用 `openai.WithChatRequestJSONCallback` dump 真实请求体字节数,跟 `response.Usage.PromptTokens` 对比;或对同一模型做"无 tools vs 带 tools"两次最小请求,看 prompt 是否凭空跳几百。
 

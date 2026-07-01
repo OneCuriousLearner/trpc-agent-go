@@ -12,6 +12,7 @@
 | T1 | 上下文压缩(Compact)升级:对标 Claude Code 分级流水线 | 高 | `[ ]` | — |
 | T2 | CodeBuddy Provider 可信度评估 / 备选后端 | 中 | `[?]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b |
 | T3 | 跨多次 LLM 调用的 token usage 累加 helper | 中 | `[ ]` | — |
+| T4 | 流式 usage 累加对非标准网关不鲁棒(可修复 bug) | 高 | `[ ]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2 |
 | _(后续挖掘持续追加)_ | | | | |
 
 ---
@@ -112,3 +113,30 @@ Claude Code 把上下文管理做成一条**正交、可组合、分级触发**�
 - 现状:一次 `Runner.Run` 内若有工具调用,会发生多次 LLM 调用,**每次各有独立 Usage**;框架不在 Runner 层累加总量。要全程总消耗得消费端自己加(参考 `examples/tokentracker/main.go:296`)。
 - [ ] 评估是否提供一个内置 helper / event,聚合单次 Run 的总 token 消耗,免去每个调用方重复实现。
 - 注意:同样**不能依赖 CodeBuddy 网关 usage**(虚高)。
+
+---
+
+## T4 — 流式 usage 累加对非标准网关不鲁棒(可修复 bug)`[ ]`
+
+### 问题(实测坐实,详见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2)
+
+OpenAI 流式协议约定 usage 只在**最后一个 chunk**出现一次。`model/openai` 依赖 OpenAI SDK 的 `ChatCompletionAccumulator`,其 `accumulateDelta`(`streamaccumulator.go`)对每个 chunk 无条件 `cc.Usage.PromptTokens += chunk.Usage.PromptTokens`。
+
+**当上游网关违反协议、每个 chunk 都重复携带完整 usage 时**(CodeBuddy 就是如此:20-chunk 流里 19 个都带 `prompt_tokens:562`),SDK 就把同一份 usage 累加了 ~chunk 数次 → prompt_tokens 虚高 ~chunk 数倍,多轮滚雪球到几十万/几百万(benchmark 实测单步报到 670 万)。带 tools 时 chunk 多、几乎每个都重复 usage,失真最重(实测 `with-tools` 6479 vs 真实 ~560)。
+
+### 影响面
+
+- 任何用 `Response.Usage` 做计量/计费/预算的场景,在对接"每 chunk 重复 usage"型网关时会严重失真。
+- 这类网关不止 CodeBuddy 一家(内网各种 Anthropic→OpenAI 协议转换层都可能有此行为),所以这是**通用健壮性问题**,不只是 CodeBuddy 专属。
+
+### 修复方向(待评估)
+
+- [ ] 在 `model/openai` 流式累加处,对 usage **不盲目透传 SDK 累加结果**:改为"取最后一次出现的 usage"(标准语义),或检测"连续 chunk 携带相同 usage"时只计一次。
+- [ ] 注意已有的 `accumulateChunkUsage` / `inverseOpenAISDKAddChunkUsage` 逻辑(`model/openai/openai.go:1860` 附近)——它本是为自定义累加设计的钩子,可能是合适的修复挂载点。
+- [ ] 加单测:构造"每 chunk 重复 usage"的 mock SSE 流,断言最终 `Response.Usage` = 单次真值(而非 ×N)。这个测试用例本身就能防回归。
+- 关键文件:`model/openai/openai.go`(`accumulateChunk` @~1838、`IncludeUsage` @~793)、SDK `streamaccumulator.go` 的 `accumulateDelta`。
+
+### 与 T2 的关系
+
+修好 T4 后,CodeBuddy 的"流式虚高"部分即可消除;剩下的"非流式固定加项 ~575"是纯网关侧问题(框架无法修)。T4 完成会显著改善 T2 的取舍——框架侧至少做到了鲁棒。
+
