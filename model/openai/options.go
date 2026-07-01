@@ -123,6 +123,17 @@ type options struct {
 	ReasoningContentBackfill    bool
 	reasoningContentBackfillSet bool
 	accumulateChunkUsage        AccumulateChunkUsage
+	// StreamUsageTakeLast controls how streaming token usage is aggregated.
+	// When true (default), the usage carried by each usage-bearing chunk is
+	// treated as a cumulative snapshot and the last one wins (take-last). When
+	// false, usage is summed across chunks (legacy behavior).
+	//
+	// Take-last is the protocol-correct semantics: streaming usage reports the
+	// running total, not a per-chunk delta. It is required for gateways that
+	// repeat the full usage on every chunk (which would otherwise be summed N
+	// times); for compliant providers that emit usage exactly once it yields
+	// the same result as summing.
+	StreamUsageTakeLast bool
 	// OptimizeForCache controls whether to optimize message structure for prompt caching.
 	// When enabled, system messages will be moved to the front to improve cache hit rates.
 	// OpenAI's prompt caching is automatic and doesn't require explicit cache control,
@@ -151,7 +162,8 @@ var (
 			InputTokensFloor:       imodel.DefaultInputTokensFloor,
 			MaxInputTokensRatio:    imodel.DefaultMaxInputTokensRatio,
 		},
-		OptimizeForCache: false,
+		OptimizeForCache:    false,
+		StreamUsageTakeLast: true, // Protocol-correct default; robust to gateways that repeat usage per chunk.
 	}
 )
 
@@ -388,6 +400,25 @@ type AccumulateChunkUsage func(u model.Usage, delta model.Usage) model.Usage
 func WithAccumulateChunkTokenUsage(a AccumulateChunkUsage) Option {
 	return func(opts *options) {
 		opts.accumulateChunkUsage = a
+	}
+}
+
+// WithStreamUsageTakeLast controls how streaming token usage is aggregated.
+//
+// When true (default), the usage on each usage-bearing chunk is treated as a
+// cumulative snapshot and the last one wins. This is the protocol-correct
+// behavior and is robust to gateways that repeat the full usage on every chunk
+// (summing those would inflate token counts by roughly the chunk count).
+//
+// When false, usage is summed across chunks (legacy behavior). Only set this
+// to false if you have a provider that emits per-chunk usage deltas rather than
+// cumulative snapshots.
+//
+// This option has no effect when WithAccumulateChunkTokenUsage is set, which
+// takes precedence.
+func WithStreamUsageTakeLast(takeLast bool) Option {
+	return func(opts *options) {
+		opts.StreamUsageTakeLast = takeLast
 	}
 }
 
