@@ -12,7 +12,7 @@
 | T1 | 上下文压缩(Compact)升级:对标 Claude Code 分级流水线 | 高 | `[ ]` | — |
 | T2 | CodeBuddy Provider 可信度评估 / 备选后端 | 中 | `[?]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b |
 | T3 | 跨多次 LLM 调用的 token usage 累加 helper | 中 | `[ ]` | — |
-| T4 | 流式 usage 累加对非标准网关不鲁棒(可修复 bug) | 高 | `[ ]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2 |
+| T4 | 流式 usage 累加对非标准网关不鲁棒(可修复 bug) | 高 | `[x]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2 |
 | _(后续挖掘持续追加)_ | | | | |
 
 ---
@@ -116,7 +116,7 @@ Claude Code 把上下文管理做成一条**正交、可组合、分级触发**�
 
 ---
 
-## T4 — 流式 usage 累加对非标准网关不鲁棒(可修复 bug)`[ ]`
+## T4 — 流式 usage 累加对非标准网关不鲁棒(可修复 bug)`[x]` 已完成
 
 ### 问题(实测坐实,详见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2)
 
@@ -129,12 +129,16 @@ OpenAI 流式协议约定 usage 只在**最后一个 chunk**出现一次。`mode
 - 任何用 `Response.Usage` 做计量/计费/预算的场景,在对接"每 chunk 重复 usage"型网关时会严重失真。
 - 这类网关不止 CodeBuddy 一家(内网各种 Anthropic→OpenAI 协议转换层都可能有此行为),所以这是**通用健壮性问题**,不只是 CodeBuddy 专属。
 
-### 修复方向(待评估)
+### 修复(已完成,commit `6562f89f`,分支 `fix/stream-usage-take-last`)
 
-- [ ] 在 `model/openai` 流式累加处,对 usage **不盲目透传 SDK 累加结果**:改为"取最后一次出现的 usage"(标准语义),或检测"连续 chunk 携带相同 usage"时只计一次。
-- [ ] 注意已有的 `accumulateChunkUsage` / `inverseOpenAISDKAddChunkUsage` 逻辑(`model/openai/openai.go:1860` 附近)——它本是为自定义累加设计的钩子,可能是合适的修复挂载点。
-- [ ] 加单测:构造"每 chunk 重复 usage"的 mock SSE 流,断言最终 `Response.Usage` = 单次真值(而非 ×N)。这个测试用例本身就能防回归。
-- 关键文件:`model/openai/openai.go`(`accumulateChunk` @~1838、`IncludeUsage` @~793)、SDK `streamaccumulator.go` 的 `accumulateDelta`。
+采用 **take-last** 语义(思路一;实测坐实流式 usage 是"累计快照"而非"增量",completion 逐 chunk 报 1→…→11,take-last=11 正确、sum=30 错)。放弃"只认 finish chunk"(思路二)——严格 OpenAI 的 usage 在**无 finish_reason** 的独立末尾 chunk 上,按 finish_reason 抓会漏掉。
+
+- [x] `model/openai/openai.go` `accumulateChunk`:chunk 带 usage 时 `acc.Usage = chunk.Usage` 覆盖 SDK 累加值(take-last);同时天然废掉 details-fix 的重复累加(仅 legacy 路径保留)。提炼 `chunkHasUsage` helper。
+- [x] 新增 option `WithStreamUsageTakeLast(bool)` 默认 **true**;`false` 回退旧 sum;`WithAccumulateChunkTokenUsage` 自定义钩子仍优先。
+- [x] 单测 3 个(`openai_test.go`):重复-usage 流 take-last 得真值(非 ×N)、关开关回退 sum、标准流无回归。全绿 + lint 0 警告。
+- [x] 真机验证:CodeBuddy `with-tools` prompt 6479 → **589**(对照裸 curl ~588),开关关回到 6479。
+
+关键文件:`model/openai/openai.go`(`accumulateChunk`)、`model/openai/options.go`(`WithStreamUsageTakeLast`)。
 
 ### 与 T2 的关系
 
