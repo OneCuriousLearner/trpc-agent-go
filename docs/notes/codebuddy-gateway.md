@@ -185,6 +185,30 @@ gpt-5.5                B +tools(1 turn)          82        53     0.6x
 
 ---
 
+## 4c. ⚠️ 网关只有 chat,没有 embedding endpoint(2026-07-03 实测)
+
+CodeBuddy 网关**只提供 `/v2/chat/completions`,不提供 embeddings**。实测:
+- `POST /v2/embeddings`、`POST /embeddings` → nginx 层直接 **401**(网关根本不路由这些路径,连应用层都到不了)
+- `POST /v2/openapi/embeddings` → **404 Route Not Found**
+
+**影响**:任何需要 embedding/向量检索的能力,在纯 CodeBuddy 环境下都**无法工作**:
+- `knowledge`(RAG,建库必须 embedding)、`memory` 的 vector 后端(pgvector/sqlitevec)、`session` recall 的 pgvector 模式。
+- 只有 chat/completions 驱动的能力(llmagent 问答、memory 的 inmemory 关键词后端、summary)才能纯靠 CodeBuddy 跑。
+
+**无 key 的替代方案(已验证)**:用**本地 Ollama** 提供 embedding,完全离线免费:
+1. 装 ollama(`ollama.com/download/ollama-linux-amd64.tar.zst`,解压到 /usr/local),`ollama serve`
+2. `ollama pull nomic-embed-text`(~270MB,768 维)
+3. 框架 embedder 用 `knowledge/embedder/ollama`(指 `http://localhost:11434`),或 RAGAS 这类要 OpenAI 协议的用 ollama 的**兼容端点** `http://localhost:11434/v1/embeddings`(实测可用)
+4. chat 仍走 CodeBuddy
+
+实测 knowledge benchmark:ollama embedding 建库(702 chunk)+ `/search` 向量检索(命中准确)+ `/answer` 简单问答(CodeBuddy chat)**全通**。回答了"构建 RAG 是否一定要外部 key"——**不需要**,本地 embedding 即可,与本地自建 RAG 无本质区别。
+
+**对 T2 的意义**:网关无 embedding 是继"usage 不可信"之后,评估 CodeBuddy 作为唯一后端的又一减分项——RAG 类能力必须额外配 embedding 来源。
+
+**遗留卡点(见 TODO T6)**:knowledge 的 RAG **agent+tool 循环**(llmagent + search tool)在 CodeBuddy 上会静默卡死(问题打印后无任何后续日志、无网络活动、进程不退)——而不带 tool 的简单 `/answer` 秒回。疑似 tool 调用后的续请求在 stream-only 网关上的又一处兼容问题。
+
+---
+
 ## 5. 抓包方法 (如何重抓其它环境的端点)
 
 CodeBuddy CLI(`codebuddy`)是 node 打包的单 ELF。要拿到它真实发出的请求:

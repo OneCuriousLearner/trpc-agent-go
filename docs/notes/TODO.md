@@ -208,6 +208,7 @@ trpc.group/trpc-go/trpc-agent-go/memory/mysql  => ../../../memory/mysql
 - benchmark 的多处 `Stream: false`(scenarios / metrics)—— 本地实验改过,非框架本体。
 - **`memory/extractor/memory.go:128`** —— 框架核心,**无任何兜底**;auto 记忆抽取实测因此完全失效(见下)。
 - **`session/summary/summarizer.go:866` 与 `:875`(`newSummaryRequest`)** —— 框架核心,summarizer 显式 `Stream: false, // Non-streaming for summarization.`。summary benchmark(MT-Bench-101)实测:两处改成 true 后 summary 模式才能在 CodeBuddy 上生成(否则非流式被网关拒)。**说明这不是 extractor 个例,而是系统性问题**——凡框架内部自建 `model.Request` 的路径都可能中招。
+- **`llmagent` 的 tool 调用循环(疑似)** —— knowledge benchmark(2026-07-03)实测:带 search tool 的 RAG agent 在 CodeBuddy 上**静默卡死**(问题打印后无任何后续日志/网络活动/报错,进程不退),而不带 tool 的简单问答秒回。即便主请求 `GenerationConfig.Stream=true`,tool 调用后的**续请求**可能没继承 stream(或有别的兼容问题)。**这是最隐蔽的一处**:没有报错,只是永久 hang。待定位 llmagent tool 循环里续请求的构造。
 
 ### 实测证据(2026-07-03,memory benchmark auto 场景)
 
