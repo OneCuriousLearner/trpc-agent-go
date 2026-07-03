@@ -186,6 +186,15 @@ trpc.group/trpc-go/trpc-agent-go/memory/mysql  => ../../../memory/mysql
 ```
 然后 `go mod tidy` 对齐,再 `CGO_ENABLED=1 go build`(sqlite-vec 需系统 `sqlite-devel`)。
 
+### 各 benchmark 的 replace 现状(2026-07-03 核对)
+
+不同 benchmark 钉的外部目标还不一样,踩法各异:
+
+- **memory**:`=> github.com/trpc-group/trpc-agent-go v1.7.1-...20260402`(官方组织,4-02 快照)。切本地即可,子模块多(memory/mysql、pgvector、sqlite、sqlitevec、session/pgvector、storage/postgres)。
+- **summary**:`=> github.com/Rememorio/trpc-agent-go v0.0.0-...20260526`(**个人 fork**,5-26 快照)。切本地时会遇到 `undefined: sessionsummary.WithDetailedContinuityPrompt` —— 该便捷 option 只存在于这个个人 fork(为跑 benchmark 定制:九段式 continuity prompt + verbatim 用户消息附录),官方主线没有。
+
+**重要澄清(避免误判方向)**:曾一度误以为"外部 fork 领先本地"。核实后**不成立**——本地 `session/summary` 最新提交 `812e273a`(2026-06-10,cache-safe forking #1932)比 summary benchmark 钉的 fork 快照(5-26)**还新**,本地官方主线整体更新。`WithDetailedContinuityPrompt` 只是个人 fork 里的一个 benchmark 专用**便捷封装**;本地用更底层通用的 `WithPrompt`/`WithSystemPrompt` 同样能实现自定义 summary prompt,只是没有那个特定函数名。**结论:本地不落后;benchmark 钉个人 fork 才是问题**——这类 benchmark 应指向官方主线/本地,而非个人 fork 的旧快照。
+
 ---
 
 ## T6 — 框架多处直接构造 `model.Request` 不设 Stream,对 stream-only 后端静默失效 `[ ]`
@@ -194,10 +203,11 @@ trpc.group/trpc-go/trpc-agent-go/memory/mysql  => ../../../memory/mysql
 
 框架内部多个地方直接 `req := &model.Request{Messages, Tools}` 构造请求,**不设 `GenerationConfig.Stream`**(默认 `false`)。对接**只支持流式**的网关(如 CodeBuddy:非流式请求直接返回 `11101 Non-stream chat request is currently not supported`)时,这些请求**全部失败**;而且很多失败路径是**静默**的,导致功能"看起来在跑、实际全废"。
 
-这是与 T4(流式 usage 累加)同源的一类问题:**框架对 stream-only 后端整体不鲁棒**。已知至少三处:
+这是与 T4(流式 usage 累加)同源的一类问题:**框架对 stream-only 后端整体不鲁棒**。已确认多处:
 - `model/codebuddy` provider —— 已在 provider 层强制 `request.Stream = true` 兜住(见 [codebuddy-gateway.md](codebuddy-gateway.md))。
-- benchmark 的 6 处 `Stream: false`(scenarios / metrics)—— 本地实验改过,非框架本体。
-- **`memory/extractor/memory.go:128`** —— 框架核心,**无任何兜底**,是本条重点。
+- benchmark 的多处 `Stream: false`(scenarios / metrics)—— 本地实验改过,非框架本体。
+- **`memory/extractor/memory.go:128`** —— 框架核心,**无任何兜底**;auto 记忆抽取实测因此完全失效(见下)。
+- **`session/summary/summarizer.go:866` 与 `:875`(`newSummaryRequest`)** —— 框架核心,summarizer 显式 `Stream: false, // Non-streaming for summarization.`。summary benchmark(MT-Bench-101)实测:两处改成 true 后 summary 模式才能在 CodeBuddy 上生成(否则非流式被网关拒)。**说明这不是 extractor 个例,而是系统性问题**——凡框架内部自建 `model.Request` 的路径都可能中招。
 
 ### 实测证据(2026-07-03,memory benchmark auto 场景)
 
@@ -225,5 +235,6 @@ extractor 抽取失败后,`benchmark/.../auto.go` 的 `waitForAutoExtraction` �
 ### 关键文件
 
 - `memory/extractor/memory.go`(`~L128` 构造请求处)
+- `session/summary/summarizer.go`(`newSummaryRequest` `~L866/875`,显式 Stream:false)
 - `model/codebuddy/codebuddy.go`(已有的 provider 层强制 stream 兜底,可作参考范式)
 - `benchmark/memory/trpc-agent-go-impl/evaluation/scenarios/auto.go`(`waitForAutoExtraction` 静默超时)
