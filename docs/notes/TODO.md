@@ -13,6 +13,7 @@
 | T2 | CodeBuddy Provider 可信度评估 / 备选后端 | 中 | `[?]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b |
 | T3 | 跨多次 LLM 调用的 token usage 累加 helper | 中 | `[ ]` | — |
 | T4 | 流式 usage 累加对非标准网关不鲁棒(可修复 bug) | 高 | `[x]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2 |
+| T5 | benchmark 子模块 go.mod 钉死外部旧版,验证本地改动会误测过时代码 | 中 | `[ ]` | — |
 | _(后续挖掘持续追加)_ | | | | |
 
 ---
@@ -144,3 +145,42 @@ OpenAI 流式协议约定 usage 只在**最后一个 chunk**出现一次。`mode
 
 修好 T4 后,CodeBuddy 的"流式虚高"部分即可消除;剩下的"非流式固定加项 ~575"是纯网关侧问题(框架无法修)。T4 完成会显著改善 T2 的取舍——框架侧至少做到了鲁棒。
 
+
+---
+
+## T5 — benchmark 子模块 go.mod 钉死外部旧版,验证本地改动会误测过时代码 `[ ]`
+
+### 问题
+
+`benchmark/*/trpc-agent-go-impl/go.mod` 的 `replace` 段把框架依赖**钉死到一个外部发布的伪版本**,例如:
+
+```
+trpc.group/trpc-go/trpc-agent-go => github.com/trpc-group/trpc-agent-go v1.7.1-0.20260402032440-a4e36132659f
+```
+
+伪版本里的 `20260402` 是 **2026-04-02** 的快照。这意味着:**任何人在本地改了框架代码后,直接 `cd benchmark/.../trpc-agent-go-impl && go run .` 跑 benchmark,用的都不是自己改的代码,而是 4 月那个外部快照。**
+
+### 真实踩坑记录(2026-07-03)
+
+T4(流式 usage take-last)已于 7-01 修复并合入 `feat/lightai`。但 memory benchmark 的 replace 钉死的是 4-02 快照(**不含**该修复)。结果:
+
+- 直接跑 → long_context QA[0] prompt 报 **186710**(旧版 SDK-sum bug 复现,虚高 10×)
+- 把 replace 改成 `=> ../../..`(本地工作树)重跑 → 同一份数据同一 prompt,回落到 **18671**(真值),与本地 tokenCounter 估算 16474 一致
+
+**教训**:验证"本地框架改动对 benchmark 的影响"前,必须先确认 benchmark 实际链接的是本地代码而非钉死的外部版本;否则会误测过时代码,甚至据此得出错误结论(本次差点把已修复的 bug 当新现象重新分析)。
+
+### 建议
+
+- [ ] 提供一个"链接本地工作树"的构建方式:比如 benchmark 目录放一个 `go.work`(workspace 模式,自动覆盖 replace),或提供 `-local` 脚本/Makefile target 临时把 replace 切到 `../../..`。
+- [ ] 在各 benchmark 的 README 里显式说明:"默认跑外部发布版;要验证本地改动,请用 go.work / 改 replace 到本地工作树。"
+- [ ] 评估 CI 是否也踩这个坑(benchmark 是否对本地改动做回归——大概率没有,因为钉死了外部版)。
+
+### 操作备忘(本次用过,可复用)
+
+把 `benchmark/memory/trpc-agent-go-impl/go.mod` 的 replace 全段改成本地相对路径:
+```
+trpc.group/trpc-go/trpc-agent-go               => ../../..
+trpc.group/trpc-go/trpc-agent-go/memory/mysql  => ../../../memory/mysql
+...(其余子模块同理指向 ../../../<子模块>)
+```
+然后 `go mod tidy` 对齐,再 `CGO_ENABLED=1 go build`(sqlite-vec 需系统 `sqlite-devel`)。
