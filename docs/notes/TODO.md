@@ -14,6 +14,7 @@
 | T3 | 跨多次 LLM 调用的 token usage 累加 helper | 中 | `[ ]` | — |
 | T4 | 流式 usage 累加对非标准网关不鲁棒(可修复 bug) | 高 | `[x]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2 |
 | T5 | benchmark 子模块 go.mod 钉死外部旧版,验证本地改动会误测过时代码 | 中 | `[ ]` | — |
+| T6 | 框架多处直接构造 `model.Request` 不设 Stream,对 stream-only 后端静默失效 | 高 | `[ ]` | — |
 | _(后续挖掘持续追加)_ | | | | |
 
 ---
@@ -184,3 +185,45 @@ trpc.group/trpc-go/trpc-agent-go/memory/mysql  => ../../../memory/mysql
 ...(其余子模块同理指向 ../../../<子模块>)
 ```
 然后 `go mod tidy` 对齐,再 `CGO_ENABLED=1 go build`(sqlite-vec 需系统 `sqlite-devel`)。
+
+---
+
+## T6 — 框架多处直接构造 `model.Request` 不设 Stream,对 stream-only 后端静默失效 `[ ]`
+
+### 问题
+
+框架内部多个地方直接 `req := &model.Request{Messages, Tools}` 构造请求,**不设 `GenerationConfig.Stream`**(默认 `false`)。对接**只支持流式**的网关(如 CodeBuddy:非流式请求直接返回 `11101 Non-stream chat request is currently not supported`)时,这些请求**全部失败**;而且很多失败路径是**静默**的,导致功能"看起来在跑、实际全废"。
+
+这是与 T4(流式 usage 累加)同源的一类问题:**框架对 stream-only 后端整体不鲁棒**。已知至少三处:
+- `model/codebuddy` provider —— 已在 provider 层强制 `request.Stream = true` 兜住(见 [codebuddy-gateway.md](codebuddy-gateway.md))。
+- benchmark 的 6 处 `Stream: false`(scenarios / metrics)—— 本地实验改过,非框架本体。
+- **`memory/extractor/memory.go:128`** —— 框架核心,**无任何兜底**,是本条重点。
+
+### 实测证据(2026-07-03,memory benchmark auto 场景)
+
+auto 场景(自动记忆抽取 + memory_search),inmemory 后端,claude-sonnet-4.6:
+
+| | 修复前(Stream 默认 false) | 修复后(extractor 加 Stream:true) |
+|---|---:|---:|
+| Overall F1 | **0.000** | **0.746** |
+| QA1(日期题) | no results | F1=1.0(精确答出 "7 May 2023") |
+| memory_search | 全部 `count:0` | 全部命中 |
+| 耗时 | 328s(轮询超时空等) | 75s |
+
+一行改动(extractor 请求 `GenerationConfig{Stream:true}`)让 auto 从**完全失效**变成 **F1=0.746**(远超 long_context 基线 0.15)。抽取质量很高——把对话规范化成 `"Attended an LGBTQ support group on 2023-05-07..."` 这类带标准化日期的结构化事实。
+
+### 更严重的次生问题:错误被静默吞没
+
+extractor 抽取失败后,`benchmark/.../auto.go` 的 `waitForAutoExtraction` 轮询 memory 数一直是 0,`sawAnyMemories` 永远 false,最后**超时返回 nil(不报错)**;上层 `EnqueueAutoMemoryJob` 的错误也没有冒泡到用户可见处。结果:抽取全挂,benchmark 却若无其事跑完,只是 F1=0。**比 token 虚高更隐蔽**——不主动 dump 记忆根本发现不了。
+
+### 建议
+
+- [ ] 排查框架内所有直接构造 `model.Request` 的地方(extractor、planner、summary、evaluation judge 等),评估是否应默认 `Stream: true`,或提供一个统一的"provider 声明 stream-only → 框架自动强制流式"的机制(类似 `model/codebuddy` 已做的,但下沉到通用层)。
+- [ ] extractor 抽取失败要有**可见的错误/警告**,不能静默吞没(至少在 auto 记忆一条都没抽出来时给出 warning)。
+- [ ] 关联 T2:若决定保留 stream-only 的 CodeBuddy 后端,这类兼容性必须在框架层解决,而非每个调用点各自设 Stream。
+
+### 关键文件
+
+- `memory/extractor/memory.go`(`~L128` 构造请求处)
+- `model/codebuddy/codebuddy.go`(已有的 provider 层强制 stream 兜底,可作参考范式)
+- `benchmark/memory/trpc-agent-go-impl/evaluation/scenarios/auto.go`(`waitForAutoExtraction` 静默超时)
