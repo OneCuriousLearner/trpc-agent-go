@@ -14,7 +14,7 @@
 | T3 | 跨多次 LLM 调用的 token usage 累加 helper | 中 | `[ ]` | — |
 | T4 | 流式 usage 累加对非标准网关不鲁棒(可修复 bug) | 高 | `[x]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2 |
 | T5 | benchmark 子模块 go.mod 钉死外部旧版,验证本地改动会误测过时代码 | 中 | `[ ]` | — |
-| T6 | 框架多处直接构造 `model.Request` 不设 Stream,对 stream-only 后端静默失效 | 高 | `[ ]` | — |
+| T6 | 框架多处直接构造 `model.Request` 不设 Stream(已逐条复核:非静默失效,会显式报错;修法应在 provider 层兜底) | 中 | `[~]` | 见 T2 决策 |
 | T7 | llmflow 主循环:空 completion 被判非 final → 死循环(真 bug,已修复);benchmark hang 实测证伪 | 高 | `[x]` | 由 T6 定位挖出 |
 | _(后续挖掘持续追加)_ | | | | |
 
@@ -208,7 +208,7 @@ trpc.group/trpc-go/trpc-agent-go/memory/mysql  => ../../../memory/mysql
 
 ---
 
-## T6 — 框架多处直接构造 `model.Request` 不设 Stream,对 stream-only 后端静默失效 `[ ]`
+## T6 — 框架多处直接构造 `model.Request` 不设 Stream(已逐条复核) `[~]`
 
 ### 问题
 
@@ -220,6 +220,29 @@ trpc.group/trpc-go/trpc-agent-go/memory/mysql  => ../../../memory/mysql
 - **`memory/extractor/memory.go:128`** —— 框架核心,**无任何兜底**;auto 记忆抽取实测因此完全失效(见下)。
 - **`session/summary/summarizer.go:866` 与 `:875`(`newSummaryRequest`)** —— 框架核心,summarizer 显式 `Stream: false, // Non-streaming for summarization.`。summary benchmark(MT-Bench-101)实测:两处改成 true 后 summary 模式才能在 CodeBuddy 上生成(否则非流式被网关拒)。**说明这不是 extractor 个例,而是系统性问题**——凡框架内部自建 `model.Request` 的路径都可能中招。
 - **`llmagent` 的 tool 调用循环** —— knowledge benchmark(2026-07-03)曾观察到:带 search tool 的 RAG agent 在 CodeBuddy 上疑似"静默卡死"。**这条观察于 2026-07-06 用真实网关实测证伪**(拆出为 [T7](#t7--llmflow-主循环空-completion-被判非-final--死循环真-bug已修复-)):CodeBuddy 拒绝非流式请求时返回的是干净的 HTTP 400,框架能正常收到 error 并退出,不会 hang;无论开不开流式都复现不出 tool 循环卡死。原观察很可能是"非流式请求被网关 400 拒、而该错误被上层静默吞没(如 `waitForAutoExtraction`)、Python 侧 RAGAS 编排空等"被误记成了 tool 循环 hang。真正卡住的是错误被吞没后的等待,不是 tool 循环本身。**不过 T7 顺带发现并修复了一个真实的独立 bug**:主循环遇到"空 completion"会死循环(与后端无关,mock 已坐实并修复)。
+
+### 逐条复核:框架内所有直接构造 `model.Request` 的点(2026-07-06 全仓库扫描 + 逐条读码核实)
+
+全仓库扫描(排除 benchmark / examples / test)得到 13 处框架核心的 `model.Request{...}` 构造点。逐条核实"是否发给 LLM、Stream 设成什么、错误怎么消费、是否核心功能",结论如下:
+
+| 点 | 是否发 LLM | Stream | stream-only 网关下的后果 |
+|----|-----------|--------|------------------------|
+| `internal/flow/llmflow/llmflow.go:518` | ❌ 否,只装 Tools 传给 response processor | 不适用 | 不受影响 |
+| `internal/flow/llmflow/llmflow.go:687` | ✅ 是(主请求) | 由 `BasicRequestProcessor` 在 preprocess 阶段填充 | 遵循 `RunOptions.Stream` / GenerationConfig,不是裸构造 |
+| `internal/flow/processor/functioncall.go:296` `:384` | ❌ 否,只装 Tools | 不适用 | 不受影响 |
+| `agent/graphagent/graph_agent.go:428` | ❌ 否,只传给 content processor 注入消息 | 不适用 | 不受影响 |
+| `graph/state_graph.go:1597` | ✅ 是(graph LLM 节点主路径) | **默认 `Stream: true`**(`:656`/`:1219`),可被 RunOptions 覆盖 | 默认安全;仅当显式覆盖成 false 才会被拒(显式报错) |
+| `memory/extractor/memory.go:128` | ✅ 是 | 零值 false | **报错**(非静默,见下) |
+| `session/summary/summarizer.go:872` | ✅ 是 | 显式 false | 报错(错误显式传播) |
+| `evolution/reviewer.go:137` | ✅ 是(异步复盘,边缘) | 零值 false | 报错(错误显式传播) |
+| `knowledge/query/llm.go:78` | ✅ 是(RAG 查询改写) | 零值 false | 报错(错误显式传播) |
+| `plugin/toolsearch/knowledge_searcher.go:74` | ✅ 是(工具检索查询改写) | 显式 false | 报错(错误显式传播) |
+| `plugin/toolsearch/llm_search.go:69` | ✅ 是(LLM 工具选择) | 显式 false | 报错(错误显式传播) |
+| `evaluation/evaluator/llm/internal/judger/judger.go:48` | ✅ 是(LLM 评判) | 显式 false | 报错(错误显式传播) |
+
+**关键更正**:原 T6 定性的"多处**静默失效**"不准确。逐条核实后,**没有一处是"框架吞掉错误"**。发给 LLM 的那些点在 stream-only 网关下都会**显式报错**(网关回干净 400 → provider emit 带 Error 的响应 → 错误 `return` 向上传播)。误报的几处根本不发 LLM(只是装 Tools 的容器)。
+
+**唯一接近"静默"的是 memory 自动抽取,但根因不是 Stream 缺失**:`memory/extractor/memory.go` 的 `Extract` 会把错误 `return`(`:142`/`:167`),上层 `memory/internal/memory/auto.go:413` 也 `return fmt.Errorf(...)` + `log.WarnfContext`。真正"看不见"是因为自动抽取跑在**后台异步 goroutine**里,错误 return 到 goroutine 顶层无人接,只剩一条 WARN 日志;benchmark 侧 `waitForAutoExtraction` 又只轮询记忆条数、等不到就超时返回 nil。这是**"异步任务错误可见性"问题**,与"该不该设 Stream"是两个独立问题。
 
 ### 实测证据(2026-07-03,memory benchmark auto 场景)
 
@@ -234,15 +257,22 @@ auto 场景(自动记忆抽取 + memory_search),inmemory 后端,claude-sonnet-4.
 
 一行改动(extractor 请求 `GenerationConfig{Stream:true}`)让 auto 从**完全失效**变成 **F1=0.746**(远超 long_context 基线 0.15)。抽取质量很高——把对话规范化成 `"Attended an LGBTQ support group on 2023-05-07..."` 这类带标准化日期的结构化事实。
 
-### 更严重的次生问题:错误被静默吞没
+### 更严重的次生问题:异步失败不可见(非"框架吞错误")
 
-extractor 抽取失败后,`benchmark/.../auto.go` 的 `waitForAutoExtraction` 轮询 memory 数一直是 0,`sawAnyMemories` 永远 false,最后**超时返回 nil(不报错)**;上层 `EnqueueAutoMemoryJob` 的错误也没有冒泡到用户可见处。结果:抽取全挂,benchmark 却若无其事跑完,只是 F1=0。**比 token 虚高更隐蔽**——不主动 dump 记忆根本发现不了。
+需要澄清:**框架本体并没有吞掉这个错误**(见上"逐条复核")——extractor 和 auto worker 都把错误 `return` 了。之所以表现成"静默失效",是因为自动记忆抽取跑在**后台异步 goroutine**里,错误 return 到顶层无人接,只剩一条 WARN 日志;而 benchmark 侧 `benchmark/.../auto.go` 的 `waitForAutoExtraction` 只轮询 memory 条数,一直是 0、`sawAnyMemories` 永远 false,最后**超时返回 nil(不报错)**。两头一叠加,抽取全挂但 benchmark 若无其事跑完、只是 F1=0。**比 token 虚高更隐蔽**——不主动 dump 记忆根本发现不了。这是"异步任务错误可见性"的通病,修法见下方建议问题二。
 
-### 建议
+### 建议(2026-07-06 复核后修订)
 
-- [ ] 排查框架内所有直接构造 `model.Request` 的地方(extractor、planner、summary、evaluation judge 等),评估是否应默认 `Stream: true`,或提供一个统一的"provider 声明 stream-only → 框架自动强制流式"的机制(类似 `model/codebuddy` 已做的,但下沉到通用层)。
-- [ ] extractor 抽取失败要有**可见的错误/警告**,不能静默吞没(至少在 auto 记忆一条都没抽出来时给出 warning)。
-- [ ] 关联 T2:若决定保留 stream-only 的 CodeBuddy 后端,这类兼容性必须在框架层解决,而非每个调用点各自设 Stream。
+复核厘清了两个**独立**的问题,不要混为一谈:
+
+**问题一:Stream 缺省与 stream-only 网关的兼容性。** 上面 8 处发 LLM 的点都是非流式(零值或显式 false),对接 stream-only 网关会被拒。但这**不是隐蔽 bug**——它们都会显式报错。而且据 T7 查证,"默认非流式"是 iWiki 官方已文档化的约定,不该在框架层擅自翻转默认。
+
+- [ ] 若决定长期支持 stream-only 后端(关联 T2 决策),正解是**在 provider 层做统一兜底**(如 `model/codebuddy` 已强制 `Stream:true`),或提供"provider 声明 stream-only → 框架自动强制流式"的通用机制。**不要**逐个调用点去改 Stream,那样零散又易漏。
+- [ ] 在此之前,这些点的报错信息可以更友好:识别出"stream-only 网关拒非流式"这类错误时,提示"该后端仅支持流式"而非透传原始 400/11101。
+
+**问题二(更值得修):异步任务的错误可见性。** memory 自动抽取的失败之所以像"静默",是因为它在后台 goroutine 里跑,错误只落到一条 WARN 日志、无人接。这跟 Stream 无关,是一类通病。
+
+- [ ] 评估给异步任务(自动记忆抽取、evolution 复盘等)加**可观测的失败上报**:计数器 / 事件 / 回调,让"后台任务连续失败"能被上层感知,而不是只在日志里。这比逐个设 Stream 更有普适价值。
 
 ### 关键文件
 
