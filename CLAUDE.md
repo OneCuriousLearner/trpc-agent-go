@@ -157,3 +157,23 @@ Plugin、Team、Evaluation、HTTP Service、Gateway、可观测、trpc agent 命
 - 引用文档内容时,标注来源文档 ID 或 URL(`https://iwiki.woa.com/p/<doc_id>`),便于复核。
 - 文档与本仓库实现冲突时,**以最新的 iWiki 文档为准**并指出差异,不要默默按记忆实现。
 - tRPC-Go 区分 v1 / v2:`trpc-go-cmdline` 工具的 v2 与项目用的 trpc-go 版本无关,**目前不推荐项目使用 trpc-go v2**(来源:文档 `118272478` / `99485252`)。涉及版本时务必查文档确认。
+
+## CodeBuddy 网关密钥(ck_)的安全使用【护网期间收紧安全限制】
+
+`ck_` 前缀的访问密钥是 CodeBuddy CLI 凭据(对应 env `CODEBUDDY_API_KEY`),可直连内网模型网关 `copilot.tencent.com/v2/chat/completions`(端点/请求头/模型清单/踩坑见 `docs/notes/codebuddy-gateway.md`)。**严禁把 `ck_` 明文贴进对话、写进代码或提交到仓库**——它会进对话历史/transcript,可能被缓存或回放。统一走环境变量:
+
+**key 的存放**:明文只存在 `~/.codebuddy.env`(`chmod 600`,在 home 不在仓库,勿提交),内容是一行 `export CODEBUDDY_API_KEY='ck_...'`,由用户自己用编辑器维护。`~/.bashrc` 和 `~/.zshrc` 末尾已各加一行 `[ -f ~/.codebuddy.env ] && set -a && . ~/.codebuddy.env && set +a` 来加载它。
+
+**测网关用 `cb-chat` 包装脚本**(`~/.local/bin/cb-chat`,已配好):
+
+```bash
+cb-chat "你的提示词"                  # 默认 claude-sonnet-4.6
+cb-chat -m glm-5.0 "你好"             # 换模型
+CB_MODEL=claude-haiku-4.5 cb-chat "hi"
+```
+
+脚本内部引用 `$CODEBUDDY_API_KEY` 发 curl,调用方不接触明文;环境变量为空时会自行 `source ~/.codebuddy.env`(所以重启 claude 后也能用,不依赖 session 环境)。
+
+**跑 Go demo / 测试**时,框架的 `model/codebuddy` provider 自己 `os.Getenv("CODEBUDDY_API_KEY")`,只要 rc 已加载 key,直接 `go run .` 即可,Claude 无需接触 key。
+
+**行为规范(Claude 必须遵守)**:绝不 `echo $CODEBUDDY_API_KEY` / `printenv` / `set -x` / `cat ~/.codebuddy.env` / `env | grep CODEBUDDY`——任何一种都会把明文泄露进 transcript。需要诊断网关问题时,只看 `cb-chat` 返回的 SSE 流或错误码(如 `11101`/`11102`,含义见 `docs/notes/codebuddy-gateway.md` §4)。需要确认"key 是否已加载"时,用 `cb-chat 'hi'` 实发一次请求来验证,而非打印变量。
