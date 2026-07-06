@@ -16,7 +16,22 @@
 | T5 | benchmark 子模块 go.mod 钉死外部旧版,验证本地改动会误测过时代码 | 中 | `[ ]` | — |
 | T6 | 框架多处直接构造 `model.Request` 不设 Stream(已逐条复核:非静默失效,会显式报错;修法应在 provider 层兜底) | 中 | `[~]` | 见 T2 决策 |
 | T7 | llmflow 主循环:空 completion 被判非 final → 死循环(真 bug,已修复);benchmark hang 实测证伪 | 高 | `[x]` | 由 T6 定位挖出 |
+| T8 | summary_ondemand(摘要 + 按需检索)实跑取经,喂给 T1 | 中 | `[ ]` | 需 pgvector;关联 T1 |
 | _(后续挖掘持续追加)_ | | | | |
+
+---
+
+## 进展快照(2026-07-06):几条旧结论已被实测更新
+
+早期(2026-07-03 前后)对 benchmark 暴露的框架问题有一批结论,这几轮实测后有**重要更新**,列在最前面以免拿着旧判断行事:
+
+- **"工具循环在 CodeBuddy 上静默卡死,根因不确定,疑似大工具结果触发"** → **已证伪 + 已修复**(见 [T7](#t7--llmflow-主循环空-completion-被判非-final--死循环真-bug已修复-))。用真实网关实测:CodeBuddy 拒绝非流式请求返回干净 HTTP 400,框架能正常报错退出;无论工具结果大小、开不开流式,都复现不出卡死。原"卡死"很可能是错误被异步/上层静默吞没后的空等被误记。排查中顺带发现并修复了一个真实的独立 bug(空 completion 死循环,与后端无关)。
+- **"内部模块拼请求不开流式 → 对 stream-only 网关静默失效"** → **定性已修正为"非静默,会显式报错"**(见 [T6](#t6--框架多处直接构造-modelrequest-不设-stream已逐条复核-))。逐条复核 13 处构造点:发 LLM 的都会显式报错,误报的几处根本不发 LLM。修法方向不变(provider 层统一兜底),但它不是"隐蔽 bug"。
+- **"WithGenerationConfig 用零值覆盖了 Stream:true 默认,是隐蔽缺陷"** → **查证为非 bug,不修**(见 [T7](#t7--llmflow-主循环空-completion-被判非-final--死循环真-bug已修复-) 剩余可选项)。iWiki 官方文档已把"默认非流式、要流式显式 `agent.WithStream(true)`"写成设计约定。
+- **"benchmark 钉死外部旧版,本地改动会误测过时代码"** → **结论成立,已充分记录**(见 [T5](#t5--benchmark-子模块-gomod-钉死外部旧版验证本地改动会误测过时代码-));同份数据 token 从 ~186k 回落到 ~18k 就是切回本地工作树后的真值。
+- **T1 可恢复压缩闭环** → **已端到端验证闭合**(见 T1"已坐实的基础")。压缩占位符带 event_id、`session_load` 能靠它取回原始内容,两端接缝对齐。
+
+**下一步聚焦**:T8(summary_ondemand 实跑,和 T1 上下文压缩升级最相关)是当前最值得做、且不依赖已了结事项的方向。
 
 ---
 
@@ -348,3 +363,41 @@ model was called 19094 times in 300ms
 - `agent/llmagent/llm_agent.go`(`~L289` 把 GenerationConfig 传进 basic processor)
 - `model/openai/openai.go`(`~L2512` `extractEmbeddedErrorResponse` 已有的部分防御,注释点明 "silent infinite loops")
 - `agent/cycleagent/cycle_agent.go` / `agent/graphagent`(已有的 `MaxIterations`/`MaxSteps` 可作参照范式)
+
+---
+
+## T8 — summary_ondemand(摘要 + 按需检索)实跑取经,喂给 T1 `[ ]`
+
+> 用户"下一步"里点名、且和 [T1](#t1--上下文压缩compact升级-) 上下文压缩升级最相关的方向。**好消息:benchmark 已有现成跑分报告**(`benchmark/summary/results/REPORT.zh_CN.md`),第一步是读懂它、把结论提炼成 T1 的设计输入,而不是从零跑。
+
+### summary_ondemand 是什么
+
+摘要模式的进阶版:把历史对话压成摘要(大幅省 token),但保留 `session_search` / `session_load` 工具,让 agent 在摘要不够用时**按需把隐藏细节拉回来**(渐进式披露)。这正是 T1 想要的"压缩不是有损丢弃,而是可恢复"——和 [T1 已坐实的可恢复压缩闭环](#已坐实的基础可恢复压缩闭环是闭合的2026-07-06)是同一套思路,只是从"tool result 占位符"扩展到"整段历史摘要 + 按需检索"。
+
+### 已有报告的关键数据(直接可作 T1 设计依据)
+
+来自 `benchmark/summary/results/REPORT.zh_CN.md`(三数据集:MT-Bench-101 / QMSum ~19K / LongMemEval ~103K):
+
+- **纯 summary 省 token 但丢早期细节**:QMSum 上纯 summary 省 94.78% prompt,但 ROUGE-L 从 0.1930 掉到 0.1516。
+- **按需检索能追回大半质量,且仍大幅省 token**:`summary_ondemand` 把 QMSum ROUGE-L 拉回 0.1770(追回 61.5% 的 ROUGE-L 损失、59.9% 的 F1 损失),同时相较 long context **仍省 76.69% prompt**。
+- **越长的上下文,按需检索越关键**:LongMemEval(~103K)上默认 summary 极限压缩(省 99.56%)但直接回答很弱,`summary_ondemand` 把 ROUGE-L 从 0.0473 提到 0.2486、仍省 93.90% prompt。
+- **一个反直觉的边界**:当摘要本身已保留原始用户事实(九段式 detailed summary)时,on-demand 的增量价值下降(detailed summary_ondemand ROUGE-L 0.2595,略低于 detailed 纯 summary 0.2965)。**启示:摘要质量和按需检索是替代关系,不是纯叠加**——摘要越好,越不需要回捞;摘要越激进,越依赖回捞兜底。
+- **短对话(≤2 轮)开摘要有害**:摘要生成开销 > 节省。**启示:T1 的分级触发必须按对话长度/token 量设阈值,短对话不压。**
+
+### 对 T1 的直接输入
+
+- T1 阶段 2 的"重档(全量 LLM 摘要)"应默认配套按需检索(`session_search`/`session_load`),否则超长上下文下质量塌陷。
+- 压缩强度要分级:短对话不压;中等上下文摘要 + 按需检索(性价比最高);超长上下文靠激进摘要 + 按需兜底。
+- 摘要 prompt 质量本身是杠杆:detailed prompt 能让纯 summary 逼近 long context,减少回捞频率(省 tool 调用往返)。
+
+### 待办
+
+- [ ] 精读 `benchmark/summary/results/REPORT{,.zh_CN}.md` 全文,把 detailed-prompt / visible-events / max-tool-iterations 等参数对质量-成本的影响提炼成 T1 的默认配置建议。
+- [?] (可选)本地实跑 `summary_ondemand` 复现报告:需 pgvector(`-pgvector-dsn`)+ 数据集下载;注意 benchmark go.mod 钉外部版问题(见 [T5](#t5--benchmark-子模块-gomod-钉死外部旧版验证本地改动会误测过时代码-),要先切本地工作树才能测本地改动)。报告已有数据,本地实跑主要用于验证 T1 改动后的效果,非取经必需。
+- [ ] 把提炼结论并入 T1 阶段 2 的设计。
+
+### 关键文件
+
+- `benchmark/summary/results/REPORT.zh_CN.md`(现成跑分报告 + 结论)
+- `benchmark/summary/trpc-agent-go-impl/qmsum.go` / `longmemeval.go`(summary_ondemand 场景实现,`WithAddSessionSummary(true)` + `WithEnableOnDemandSession(true)` 的标准用法)
+- `internal/session/tool/recall/`(`session_search` / `session_load` 工具实现)
