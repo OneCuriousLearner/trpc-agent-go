@@ -19,6 +19,7 @@ import (
 	"trpc.group/trpc-go/trpc-agent-go/event"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
+	sessioninmemory "trpc.group/trpc-go/trpc-agent-go/session/inmemory"
 )
 
 type sequenceTokenCounter struct {
@@ -1287,4 +1288,116 @@ func TestContentRequestProcessor_ProcessRequest_ContextCompactionWithInvocationF
 	require.Equal(t, "tool-call-old", req.Messages[1].ToolID)
 	require.Equal(t, "worker", req.Messages[1].ToolName)
 	require.Equal(t, "hello", req.Messages[2].Content)
+}
+
+// TestContextCompaction_RecoveryRoundTrip_ViaSessionEventWindow verifies the
+// full "recoverable compaction" loop end to end: a large tool result is stored
+// in a real (in-memory) session, context compaction replaces it with a
+// placeholder that carries the originating event_id, and that same event_id
+// can be fed to the session event-window API (the mechanism behind the
+// session_load tool) to recover the ORIGINAL, un-compacted tool result.
+//
+// The compaction unit tests and the recall tests each cover one half; this
+// test proves the seam between them actually lines up — the event_id written
+// into the placeholder is the very id the session window lookup resolves.
+func TestContextCompaction_RecoveryRoundTrip_ViaSessionEventWindow(t *testing.T) {
+	ctx := context.Background()
+
+	// A tool result large enough to be compacted away.
+	originalPayload := strings.Repeat("recoverable-secret-payload ", 64)
+
+	const (
+		toolEventID = "evt-tool-recover"
+		toolCallID  = "tool-call-recover"
+		toolName    = "worker"
+		anchorLater = "evt-current"
+		appName     = "compact-e2e"
+		userID      = "u1"
+		agentFilter = "test-agent"
+	)
+
+	// 1. Store the large tool result in a REAL in-memory session.
+	svc := sessioninmemory.NewSessionService()
+	key := session.Key{AppName: appName, UserID: userID}
+	sess, err := svc.CreateSession(ctx, key, nil)
+	require.NoError(t, err)
+
+	toolEvent := event.Event{
+		ID:           toolEventID,
+		RequestID:    "req-old",
+		InvocationID: "inv-old",
+		FilterKey:    agentFilter,
+		Response: &model.Response{
+			Done: true,
+			Choices: []model.Choice{{
+				Message: model.NewToolMessage(toolCallID, toolName, originalPayload),
+			}},
+		},
+	}
+	require.NoError(t, svc.AppendEvent(ctx, sess, &toolEvent))
+
+	// A later event so the tool result is "historical" (not the current unit).
+	currentEvent := event.Event{
+		ID:           anchorLater,
+		RequestID:    "req-current",
+		InvocationID: "inv-current",
+		FilterKey:    agentFilter,
+		Response: &model.Response{
+			Done: true,
+			Choices: []model.Choice{{
+				Message: model.NewToolMessage("tool-call-current", toolName, "ok"),
+			}},
+		},
+	}
+	require.NoError(t, svc.AppendEvent(ctx, sess, &currentEvent))
+
+	// 2. Compact. The historical large tool result must become a placeholder
+	//    that carries its originating event_id.
+	compacted, stats := compactIncrementEvents(
+		ctx,
+		[]event.Event{toolEvent, currentEvent},
+		"req-current",
+		"inv-current",
+		ContextCompactionConfig{
+			Enabled:             true,
+			KeepRecentRequests:  0,
+			ToolResultMaxTokens: 10,
+		},
+	)
+	require.Equal(t, 1, stats.ToolResultsCompacted)
+
+	placeholder := compacted[0].Response.Choices[0].Message.Content
+	require.Contains(t, placeholder, historicalToolResultPlaceholder)
+	require.Contains(t, placeholder, "event_id: "+toolEventID)
+	// The original payload must be gone from the compacted view.
+	require.NotContains(t, placeholder, "recoverable-secret-payload")
+
+	// 3. Use that event_id to recover the ORIGINAL content via the session
+	//    event-window API (what session_load calls under the hood).
+	reloaded, err := svc.GetEventWindow(ctx, session.EventWindowRequest{
+		Key: session.Key{
+			AppName:   appName,
+			UserID:    userID,
+			SessionID: sess.ID,
+		},
+		AnchorEventID: toolEventID,
+		Roles:         []model.Role{model.RoleUser, model.RoleAssistant, model.RoleTool},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, reloaded)
+
+	// The anchored window must contain the full, un-compacted payload again.
+	var recovered string
+	for _, entry := range reloaded.Entries {
+		if entry.Event.ID != toolEventID || entry.Event.Response == nil {
+			continue
+		}
+		for _, choice := range entry.Event.Response.Choices {
+			if choice.Message.ToolID == toolCallID {
+				recovered = choice.Message.Content
+			}
+		}
+	}
+	require.Equal(t, originalPayload, recovered,
+		"session event window should recover the original tool result via the event_id written into the compaction placeholder")
 }

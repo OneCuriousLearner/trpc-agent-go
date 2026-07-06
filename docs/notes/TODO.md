@@ -83,6 +83,16 @@ Claude Code 把上下文管理做成一条**正交、可组合、分级触发**�
 - [?] 评估是否值得引入 Claude Code 式的 "collapse store + commit log 重放":让摘要/折叠跨轮持久,而不是每轮重新计算。
 - [?] 这依赖 session 层支持"投影视图",改动面大,**先调研再决定**。
 
+### 已坐实的基础:可恢复压缩闭环是闭合的(2026-07-06)
+
+阶段 2 的"轻量档"(tool result 占位符)依赖一个前提——占位符要可恢复,否则压掉的信息就真丢了。**这个前提本轮已实测坐实**:
+
+- **占位符已带恢复锚点**:`context_compact.go` 的 `toolResultRecoveryRef` 已带 `EventID` / `ToolCallID`,压缩后占位符文本会写入 `event_id: <id>` 并提示"用 `session_load` 配合 `event_id` + `content_offset`/`content_limit` 取回"。(原以为"占位符要加 event_id"是待办,实际框架已实现,认知已纠正。)
+- **恢复端已就位**:`internal/session/tool/recall/load.go` 的 `session_load` 工具接受 `event_id`(或 `tool_call_id` 后备),经 `GetEventWindow` 从 session 取回原始事件窗口,支持大结果切片。
+- **闭环已端到端验证**:新增测试 `TestContextCompaction_RecoveryRoundTrip_ViaSessionEventWindow`(`internal/flow/processor/context_compact_test.go`)——用**真实 inmemory session service**:存入大 tool result → 压缩成带 `event_id` 的占位符(确认原文已从视图消失)→ 用该 `event_id` 调 `GetEventWindow` 取回**压缩前的原始完整内容**。证明两端接缝(compact 写的 `evt.ID` == session 窗口查的 `AnchorEventID`)对齐。此前 compact 侧和 recall 侧各有单测,但缺跨模块闭环验证,本轮补上。
+
+**意义**:分级压缩的轻量档有了可靠地基——压缩不是有损丢弃,而是"移出活动上下文、按需可拉回"。后续做阶段 2 时可放心在此之上叠加中等/重档。
+
 ### 注意事项 / 坑
 
 - **不要用 CodeBuddy 网关的 usage 数字驱动压缩决策** —— 网关 token 虚高(见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b)。压缩判断要用本地 `TokenCounter` 估算(框架现状正是如此,保持)。
@@ -298,7 +308,7 @@ model was called 19094 times in 300ms
 ### 剩余可选项(未做)
 
 - [ ] **源头防御(治标,低优先)**:`openai` provider 的非流式路径遇到"HTTP 200 + 不可识别空 body"时可直接 emit error。但主循环那层已治本兜住,这只是锦上添花,且 CodeBuddy 实测回的是干净 400、不走这条路,暂无实际触发场景。
-- [ ] **同源修(联动 T6,中优先):`WithGenerationConfig` 覆盖 Stream 的问题**。`basic processor` 直接 `req.GenerationConfig = p.GenerationConfig` 会用零值 `Stream:false` 覆盖默认 `true`(这正是 benchmark RAG agent 被网关 400 拒的直接原因)。考虑改成 merge 语义(只覆盖调用方显式设置的字段),或在 basic processor 保留 `Stream` 默认。这条能一并缓解 T6 里 extractor / summarizer 的同类问题。
+- [x] **~~同源修:`WithGenerationConfig` 覆盖 Stream~~(2026-07-06 查证:非 bug,不修)**。原以为"basic processor 默认 `Stream:true` 被零值覆盖成 false"是隐蔽缺陷,准备改成 merge 语义保留 true 默认。但查 iWiki 官方 Agent 文档(`4015773536`)发现,**"默认非流式、要流式请显式 `agent.WithStream(true)` 或在 `GenerationConfig` 里带 `Stream:true`"是已文档化的设计约定**(文档原文:"如果没有显式传入 `llmagent.WithGenerationConfig(...)`,LLMAgent 默认会透传零值 `model.GenerationConfig{}`,因此默认是非流式";并举例 OpenClaw 会自行开流式)。改成"保留 true 默认"会把默认行为从非流式翻转成流式,**与官方约定冲突**,按"以 iWiki 为准"原则不改。`basic processor` 里那个 `Stream:true` 内部初值会被正常覆盖,无对外效果。`GenerationConfigPatch`(`model/request.go`)是框架已有的"部分覆盖"类型,但目前未被 llmagent/runner 接线;单次请求覆盖 Stream 的正道是 `agent.WithStream(true)`(即 `RunOptions.Stream`,`*bool`)。**benchmark RAG agent 被 400 拒的正解是"对 stream-only 网关显式开流式",不是改框架默认。**
 
 ### 关键文件
 
