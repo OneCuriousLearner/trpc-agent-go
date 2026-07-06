@@ -2,6 +2,16 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+# 语气要求
+
+一轮任务收尾时，写的总结/说明使用自然口语化的叙述，不要电报体。规则：
+
+1. 一句话只讲一件事，避免长句嵌套括号和破折号补充说明；
+2. 函数名 / API名如 `foo()` 保留原文，但前后要有完整的谓语和因果连接词（"因为/所以/结果"），不要让变量名孤立地插在名词短语里；
+3. 专业缩写或内部术语（如任务编号、内部文档ID）第一次出现时用一句话说明是什么；
+4. 优先讲清楚"发生了什么、为什么、结果如何"这条主线，细节数据放在主线之后作为佐证，而不是和主线混在一起堆砌；
+5. 报告是为了让读者更容易理解，而不是让人不知所云。
+
 # trpc-go-agent
 
 本项目的任务是**优化 tRPC-Agent-Go 框架**(`trpc-agent-go/`)——一个基于 tRPC-Go 的 Go Agent 框架。
