@@ -854,6 +854,119 @@ func TestResponse_IsFinalResponse(t *testing.T) {
 	}
 }
 
+func TestResponse_IsEmptyTerminalResponse(t *testing.T) {
+	tests := []struct {
+		name     string
+		rsp      *Response
+		expected bool
+	}{
+		{
+			name:     "nil response",
+			rsp:      nil,
+			expected: false,
+		},
+		{
+			name:     "done with no content, error, or tool call (empty terminal)",
+			rsp:      &Response{Done: true},
+			expected: true,
+		},
+		{
+			name: "done with empty choices slice",
+			rsp: &Response{
+				Done:    true,
+				Choices: []Choice{},
+			},
+			expected: true,
+		},
+		{
+			name: "done with a choice that has no content",
+			rsp: &Response{
+				Done:    true,
+				Choices: []Choice{{Index: 0}},
+			},
+			expected: true,
+		},
+		{
+			name:     "not done",
+			rsp:      &Response{Done: false},
+			expected: false,
+		},
+		{
+			name: "streaming partial",
+			rsp: &Response{
+				Done:      true,
+				IsPartial: true,
+			},
+			expected: false,
+		},
+		{
+			name: "done with error",
+			rsp: &Response{
+				Done:  true,
+				Error: &ResponseError{Message: "boom"},
+			},
+			expected: false,
+		},
+		{
+			name: "done with content",
+			rsp: &Response{
+				Done: true,
+				Choices: []Choice{
+					{Message: Message{Content: "hello"}},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "done with reasoning content only",
+			rsp: &Response{
+				Done: true,
+				Choices: []Choice{
+					{Message: Message{ReasoningContent: "thinking"}},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "tool call response",
+			rsp: &Response{
+				Done: true,
+				Choices: []Choice{
+					{Message: Message{ToolCalls: []ToolCall{{ID: "t1"}}}},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "tool result response",
+			rsp: &Response{
+				Done: true,
+				Choices: []Choice{
+					{Message: Message{ToolID: "t1", Content: ""}},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "delta content only",
+			rsp: &Response{
+				Done: true,
+				Choices: []Choice{
+					{Delta: Message{Content: "partial"}},
+				},
+			},
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := tt.rsp.IsEmptyTerminalResponse()
+			assert.Equal(t, tt.expected, got)
+		})
+	}
+}
+
 func TestResponse_Clone(t *testing.T) {
 	tests := []struct {
 		name     string

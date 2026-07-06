@@ -281,6 +281,36 @@ func (f *Flow) Run(ctx context.Context, invocation *agent.Invocation) (<-chan *e
 				steer.Close(invocation)
 				break
 			}
+
+			// Guard against a pathological loop: the step produced a response
+			// that is marked done but carries no content, no error, and no tool
+			// call (an "empty terminal response"). Such a response is neither a
+			// final answer nor a reason to continue, so re-running the step would
+			// spin forever with an unchanged request. This happens, for example,
+			// when a stream-only OpenAI-compatible gateway rejects a non-stream
+			// request and the SDK parses the reply into an empty completion.
+			// Emit an explicit flow error and terminate instead of hanging.
+			if lastEvent.Response.IsEmptyTerminalResponse() {
+				log.ErrorfContext(
+					ctx,
+					"Flow received an empty terminal response for agent %s "+
+						"(done with no content, error, or tool call); terminating "+
+						"to avoid an infinite loop. This often indicates a backend "+
+						"that returned an unrecognized empty reply (e.g. a stream-only "+
+						"gateway rejecting a non-stream request).",
+					invocation.AgentName,
+				)
+				errorEvent := event.NewErrorEvent(
+					invocation.InvocationID,
+					invocation.AgentName,
+					model.ErrorTypeFlowError,
+					"model returned an empty terminal response (no content, error, "+
+						"or tool call); terminating to avoid an infinite loop",
+				)
+				agent.EmitEvent(ctx, invocation, eventChan, errorEvent)
+				steer.Close(invocation)
+				break
+			}
 		}
 	}(runCtx)
 

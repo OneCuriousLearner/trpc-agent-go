@@ -3811,3 +3811,82 @@ func TestWaitEventTimeout_NoDeadline(t *testing.T) {
 	timeout := WaitEventTimeout(ctx)
 	require.Equal(t, 5*time.Second, timeout)
 }
+
+// emptyTerminalModel always returns an "empty terminal response": Done=true
+// with no choices, no error, and no tool call. This mirrors what some
+// OpenAI-compatible gateways produce when they reject a request and the SDK
+// parses the reply into an empty completion.
+type emptyTerminalModel struct {
+	mu    sync.Mutex
+	calls int
+}
+
+func (m *emptyTerminalModel) Info() model.Info { return model.Info{Name: "empty-terminal"} }
+
+func (m *emptyTerminalModel) GenerateContent(
+	ctx context.Context,
+	req *model.Request,
+) (<-chan *model.Response, error) {
+	m.mu.Lock()
+	m.calls++
+	m.mu.Unlock()
+	ch := make(chan *model.Response, 1)
+	ch <- &model.Response{Done: true}
+	close(ch)
+	return ch, nil
+}
+
+func (m *emptyTerminalModel) callCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.calls
+}
+
+// TestRun_EmptyTerminalResponseTerminatesWithFlowError verifies that when the
+// model keeps returning an empty terminal response, the flow does NOT spin in
+// an infinite loop: it terminates promptly and emits a flow error event.
+//
+// Regression test for the "silent hang" observed when a stream-only gateway
+// rejected a non-stream request, yielding an empty completion that was neither
+// a final response nor a reason to continue.
+func TestRun_EmptyTerminalResponseTerminatesWithFlowError(t *testing.T) {
+	f := New(nil, nil, Options{})
+	m := &emptyTerminalModel{}
+	inv := agent.NewInvocation(
+		agent.WithInvocationID("inv-empty-terminal"),
+		agent.WithInvocationAgent(&minimalAgent{}),
+		agent.WithInvocationModel(m),
+	)
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	eventChan, err := f.Run(ctx, inv)
+	require.NoError(t, err)
+
+	var sawFlowError bool
+	for evt := range eventChan {
+		if evt == nil {
+			continue
+		}
+		if evt.RequiresCompletion {
+			require.NoError(t, inv.NotifyCompletion(
+				context.Background(),
+				agent.GetAppendEventNoticeKey(evt.ID),
+			))
+		}
+		if evt.Response != nil && evt.Response.Error != nil &&
+			evt.Response.Error.Type == model.ErrorTypeFlowError {
+			sawFlowError = true
+		}
+	}
+
+	// The loop must terminate (channel closed) rather than hang. If the bug
+	// were present, the range above would block until the 5s context timeout
+	// and the model call count would be enormous.
+	require.LessOrEqual(t, m.callCount(), 2,
+		"model should be called at most a couple of times before the flow "+
+			"detects the empty terminal response and stops")
+	require.True(t, sawFlowError,
+		"flow should emit an explicit flow error for the empty terminal response")
+}

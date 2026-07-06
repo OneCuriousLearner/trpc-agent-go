@@ -369,6 +369,54 @@ func (rsp *Response) IsFinalResponse() bool {
 	return rsp.Done && (len(rsp.Choices) > 0 || rsp.Error != nil)
 }
 
+// IsEmptyTerminalResponse reports whether the response is marked as done but
+// carries no usable payload: no choices, no error, no tool calls, and it is
+// not a streaming partial. Such a response gives the agent loop no reason to
+// either finish (no content/error) or continue (no tool call), so treating it
+// as "keep looping" would spin forever with an unchanged request. Some
+// OpenAI-compatible gateways produce this shape when they return HTTP 200 with
+// a body the SDK parses into an empty completion (e.g. a stream-only gateway
+// rejecting a non-stream request). Callers should terminate the loop with an
+// explicit error instead of retrying.
+func (rsp *Response) IsEmptyTerminalResponse() bool {
+	if rsp == nil {
+		return false
+	}
+	if rsp.IsPartial || rsp.Error != nil {
+		return false
+	}
+	if !rsp.Done {
+		return false
+	}
+	if rsp.IsToolCallResponse() {
+		return false
+	}
+	// Done, not partial, no error, no tool call: empty only when it also has no
+	// choice content.
+	return !hasResponseContent(rsp)
+}
+
+// hasResponseContent reports whether any choice carries assistant content,
+// reasoning content, or a tool result. Used to distinguish a genuinely empty
+// terminal response from one that merely lacks a top-level field.
+func hasResponseContent(rsp *Response) bool {
+	for _, choice := range rsp.Choices {
+		if choice.Message.Content != "" || choice.Message.ReasoningContent != "" {
+			return true
+		}
+		if choice.Delta.Content != "" || choice.Delta.ReasoningContent != "" {
+			return true
+		}
+		if choice.Message.ToolID != "" || choice.Delta.ToolID != "" {
+			return true
+		}
+		if len(choice.Message.ContentParts) > 0 || len(choice.Delta.ContentParts) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
 // ResponseError represents an error response from the API.
 type ResponseError struct {
 	// Message is the error message.

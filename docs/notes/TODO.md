@@ -15,6 +15,7 @@
 | T4 | 流式 usage 累加对非标准网关不鲁棒(可修复 bug) | 高 | `[x]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2 |
 | T5 | benchmark 子模块 go.mod 钉死外部旧版,验证本地改动会误测过时代码 | 中 | `[ ]` | — |
 | T6 | 框架多处直接构造 `model.Request` 不设 Stream,对 stream-only 后端静默失效 | 高 | `[ ]` | — |
+| T7 | ⭐ llmflow 主循环**无迭代上限** + 空 completion 被判非 final → 永久 hang(已复现) | 高 | `[~]` | 由 T6 定位挖出 |
 | _(后续挖掘持续追加)_ | | | | |
 
 ---
@@ -208,7 +209,7 @@ trpc.group/trpc-go/trpc-agent-go/memory/mysql  => ../../../memory/mysql
 - benchmark 的多处 `Stream: false`(scenarios / metrics)—— 本地实验改过,非框架本体。
 - **`memory/extractor/memory.go:128`** —— 框架核心,**无任何兜底**;auto 记忆抽取实测因此完全失效(见下)。
 - **`session/summary/summarizer.go:866` 与 `:875`(`newSummaryRequest`)** —— 框架核心,summarizer 显式 `Stream: false, // Non-streaming for summarization.`。summary benchmark(MT-Bench-101)实测:两处改成 true 后 summary 模式才能在 CodeBuddy 上生成(否则非流式被网关拒)。**说明这不是 extractor 个例,而是系统性问题**——凡框架内部自建 `model.Request` 的路径都可能中招。
-- **`llmagent` 的 tool 调用循环(疑似)** —— knowledge benchmark(2026-07-03)实测:带 search tool 的 RAG agent 在 CodeBuddy 上**静默卡死**(问题打印后无任何后续日志/网络活动/报错,进程不退),而不带 tool 的简单问答秒回。即便主请求 `GenerationConfig.Stream=true`,tool 调用后的**续请求**可能没继承 stream(或有别的兼容问题)。**这是最隐蔽的一处**:没有报错,只是永久 hang。待定位 llmagent tool 循环里续请求的构造。
+- **`llmagent` 的 tool 调用循环** —— knowledge benchmark(2026-07-03)实测:带 search tool 的 RAG agent 在 CodeBuddy 上**静默卡死**(问题打印后无任何后续日志/网络活动/报错,进程不退),而不带 tool 的简单问答秒回。**根因已于 2026-07-06 完整坐实并复现,拆出为独立项 [T7](#t7--llmflow-主循环无迭代上限--空-completion-被判非-final--永久-hang-)**:表层是 benchmark 的 RAG agent 用 `WithGenerationConfig({Temperature:0})` 覆盖掉了 basic processor 的 `Stream:true` 默认值(注意:它走的是**原生 openai provider**,不是 codebuddy provider,故没有 provider 层强制 stream 的兜底)→ 非流式请求被网关拒 → 空 completion → llmflow 主循环无迭代上限而无限重试。**T7 是比 Stream 更根本的框架健壮性缺陷,与后端无关。**
 
 ### 实测证据(2026-07-03,memory benchmark auto 场景)
 
@@ -239,3 +240,57 @@ extractor 抽取失败后,`benchmark/.../auto.go` 的 `waitForAutoExtraction` �
 - `session/summary/summarizer.go`(`newSummaryRequest` `~L866/875`,显式 Stream:false)
 - `model/codebuddy/codebuddy.go`(已有的 provider 层强制 stream 兜底,可作参考范式)
 - `benchmark/memory/trpc-agent-go-impl/evaluation/scenarios/auto.go`(`waitForAutoExtraction` 静默超时)
+
+---
+
+## T7 — llmflow 主循环无迭代上限 + 空 completion 被判非 final → 永久 hang `[~]`
+
+> 2026-07-06 由 T6 定位深挖而来,已**读码坐实 + mock 复现**。这是比 T6(Stream 缺失)**更根本**的框架健壮性缺陷:它与具体后端/provider 无关,任何 provider 吐出"非 final、非 error 的空 response"都会让 llmagent 永久 hang。
+
+### 问题
+
+`llmagent` 的 tool 调用主循环(`internal/flow/llmflow/llmflow.go:205-284` 的 `for {}`)**没有任何迭代/步数上限**。它的退出条件只有四个:
+
+1. `runOneStep` 返回 error → 发 error event 退出;
+2. `invocation.EndInvocation` 被置位;
+3. `lastEvent == nil`(该步无任何 event);
+4. `lastEvent.IsFinalResponse()`。
+
+问题出在:**一个 `Done:true` 但既无 `Choices` 也无 `Error` 的"空 completion",`IsFinalResponse()` 返回 `false`**(`model/response.go:369`:`return rsp.Done && (len(rsp.Choices) > 0 || rsp.Error != nil)`),而它又不是 nil、不是 error、不置 EndInvocation。于是四个退出条件**一个都不满足** → 主循环带着**内容完全没变**的请求再跑一轮 → 又得到同样的空 completion → **无限循环,进程永不退出**。
+
+对比:`cycleagent`(`WithMaxIterations`)、`graphagent`(`WithMaxSteps`)都有迭代上限保护;**唯独最常用的 llmagent tool 循环裸奔无保护**。
+
+### 触发路径(knowledge RAG benchmark 实测的那次 hang)
+
+1. RAG agent 传 `llmagent.WithGenerationConfig({Temperature:0})`,`Stream` 是零值 `false`(`benchmark/knowledge/.../knowledge.go:341-360`);
+2. `buildRequestProcessorsWithAgent`(`agent/llmagent/llm_agent.go:289`)把这个 config 通过 `WithGenerationConfig` 传进 basic processor,`BasicRequestProcessor.ProcessRequest`(`internal/flow/processor/basic.go:81`)**整体赋值** `req.GenerationConfig = p.GenerationConfig`(不 merge)→ 默认的 `Stream:true` 被覆盖成 `false`;
+3. 每轮请求 `Stream:false` 打到 **stream-only 的 CodeBuddy 网关**(注意 benchmark 走的是**原生 openai provider**,靠 `OPENAI_BASE_URL` 指向网关,**没有** `model/codebuddy` provider 那层强制 stream 兜底);
+4. 网关拒绝非流式 → openai provider 走 `handleNonStreamingResponseWithEmitter`;若网关返回的错误体**不被 `extractEmbeddedErrorResponse` 识别**(该函数只认 `{"error":{message,type,...}}` 结构),就产出一个**空 completion**;
+5. 空 completion → `IsFinalResponse()==false` → 主循环无限重试 → hang。
+
+> 框架里其实**已有一段针对性防御**:`model/openai/openai.go:2512-2519` 的 `extractEmbeddedErrorResponse`,注释直白写着要防止 "empty completion that can cause **silent infinite loops** in the agent flow" —— 说明**有人已经踩过这个坑**。但它只兜"HTTP 200 + 可识别 error body"这一种;识别不了的返回格式(空 body / 非标准 error)照样漏成空 completion → hang。**根治必须在主循环加上限,不能只靠逐一识别各家网关的错误格式。**
+
+### 复现证据(mock,不依赖任何网关 / key)
+
+用一个每次都返回空 completion(`{Done:true}`,无 Choices 无 Error)的 mock model 跑 llmflow 主循环 300ms:
+
+```
+model was called 19094 times in 300ms
+```
+
+**19094 次调用 = 铁证的无限循环**(正确行为应只调 1 次即终止)。复现代码为临时诊断脚本,验证后已删除;正式修复应把等价断言固化为回归测试。
+
+### 建议修复(分两层,按根本性排序)
+
+- [ ] **主修(根治):llmflow 主循环加迭代上限**。参照 `cycleagent.WithMaxIterations` / `graphagent.WithMaxSteps`,给 llmagent 加 `WithMaxToolIterations`(或类似)option + 一个合理默认值(如 Claude Code 侧的循环也有硬上限)。超限时发一个明确的 error event 后退出,而不是无声空转。这一条**与后端无关,能根治所有 provider 的此类 hang**。
+- [ ] **兼修:空 completion 应被判为终止或报错**。要么让 `IsFinalResponse()` 对"`Done:true` 且无 Choices 无 Error"也返回 true(视作空的终止响应),要么在主循环里显式检测"连续 N 步无实质进展(无新 content / 无 tool call)"并中止。需评估对正常流式(partial chunk)的影响,勿误伤。
+- [ ] **同源修(联动 T6):`WithGenerationConfig` 覆盖 Stream 的问题**。basic processor 直接 `req.GenerationConfig = p.GenerationConfig` 会用零值 `Stream:false` 覆盖默认 `true`。考虑改成 merge 语义(仅覆盖调用方显式设置的字段),或在 basic processor 保留 `Stream` 默认。这条能一并缓解 T6 里 extractor / summarizer 的同类问题。
+
+### 关键文件
+
+- `internal/flow/llmflow/llmflow.go`(`205-284` 主循环 `for {}`,无迭代上限)
+- `model/response.go`(`~L359` `IsFinalResponse`:空 completion 判非 final)
+- `internal/flow/processor/basic.go`(`~L81` `req.GenerationConfig = p.GenerationConfig` 整体覆盖)
+- `agent/llmagent/llm_agent.go`(`~L289` 把 GenerationConfig 传进 basic processor)
+- `model/openai/openai.go`(`~L2512` `extractEmbeddedErrorResponse` 已有的部分防御,注释点明 "silent infinite loops")
+- `agent/cycleagent/cycle_agent.go` / `agent/graphagent`(已有的 `MaxIterations`/`MaxSteps` 可作参照范式)
