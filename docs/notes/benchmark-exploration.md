@@ -139,9 +139,10 @@
 |------|------|------|
 | `memory/extractor/memory.go` | auto 记忆抽取全失败,F1=0 | 显式定位:改 Stream:true 后 F1→0.746 |
 | `session/summary/summarizer.go` | summary 生成被网关拒 | 显式:`Stream: false` 两处 |
-| `llmagent` tool 调用循环 | RAG agent **静默卡死**(无输出/无网络/进程不退) | 疑似:tool 后续请求未继承 stream |
+| `llmagent` tool 调用循环 | RAG agent 疑似"静默卡死" | **2026-07-06 实测证伪**,见下 |
 
-- **最隐蔽的是失败方式**:extractor 的错误被 `waitForAutoExtraction` 静默吞没(超时返回 nil),benchmark 若无其事跑完只是 F1=0;tool 循环则直接永久 hang 无报错。**不主动 dump 根本发现不了**。
+- **最隐蔽的是失败方式**:extractor 的错误被 `waitForAutoExtraction` 静默吞没(超时返回 nil),benchmark 若无其事跑完只是 F1=0。
+- **关于"tool 循环静默卡死"的更正(2026-07-06 实测)**:用真实 CodeBuddy 网关(`ck_` key)复现,发现这条 hang 观察**站不住**。CodeBuddy 拒绝非流式请求时返回的是干净的 HTTP 400(`{"code":11101,...}`),框架能正常收到 error 并退出;完整搭一个和 benchmark 一样的带 tool 的 RAG agent 实测,不开流式时第一次请求就被 400 拒、691ms 内正常报错退出,开流式时 tool 循环完整跑通(含 8200 字节大 tool result 的续请求),都不 hang。原观察很可能是"非流式请求被 400 拒、错误被上层静默吞没、Python 侧 RAGAS 空等"被误记成了 tool 循环 hang。**详见 [TODO.md](TODO.md) T7**——排查过程中顺带发现并修复了一个真实的独立 bug(主循环遇到"空 completion"会死循环,与后端无关,mock 已坐实)。
 - **参考修复范式**:`model/codebuddy` provider 在 provider 层强制 `request.Stream=true` 兜住——应下沉为通用机制。
 
 ### 4.3 CodeBuddy 网关能力边界
@@ -163,6 +164,6 @@
 
 ## 6. 未完成 / 后续
 
-- knowledge 完整 RAGAS 分数未跑出(卡在 T6 的 llmagent tool 循环 hang)——定位该 hang 是 T6 的下一步。
+- knowledge 完整 RAGAS 分数未跑出——原以为是"llmagent tool 循环 hang",**2026-07-06 实测证伪**(见 §4.2 更正):真实网关下 tool 循环能跑通,原现象是非流式请求被网关 400 拒、错误被上层静默吞没所致。真正的后续是解决"非流式请求被 stream-only 网关拒"(T6:`WithGenerationConfig` 覆盖 Stream)或改用流式,再跑完整 RAGAS。
 - QMSum / LongMemEval 的 `summary_ondemand`(摘要+按需检索)未跑(需 pgvector)——这是 T1(上下文压缩升级)最相关的成熟范式,值得后续实跑取经。
 - 所有实验改动均为临时、已还原;benchmark 子模块与主仓库均干净。
