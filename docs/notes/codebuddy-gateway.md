@@ -108,6 +108,7 @@ CLI 报告的完整清单(`model/codebuddy/models.go` 里有导出常量):
 | `11102` | `model [...] service info not found` | 模型名拼错 / 该环境无此模型 | 用 §3 的精确 ID |
 | `11127` | `messages length must be at least 2` | **不是模型问题**——部分模型(如 opus)要求 ≥2 条消息 | system + user 两条 |
 | `11133` | `Invalid request parameters` (`max_output_tokens` ...) | **不是模型问题**——`max_tokens` 太小触发约束 | 给合理的 `max_tokens`(如 ≥64) |
+| `14019` | `当前无可用Token额度` | **`ck_` key 的 Token 额度耗尽**(非模型/参数问题,所有模型均返回) | 联系团队负责人/HRBP 申请额度;额度查看 `aitoken.woa.com`。验证时跑大量 long-context 请求(如 benchmark detailed summary 单次上万 token)容易触发 |
 | `Non-stream chat request is currently not supported` | — | 用了非流式 | `"stream": true` |
 
 > 教训:`11127`/`11133` 第一眼像"模型不可用",其实是请求参数约束。用最小 payload(如 `max_tokens:8`、单条 message)探测模型可用性会误判——要用合理 payload 复测。

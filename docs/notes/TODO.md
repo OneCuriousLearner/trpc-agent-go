@@ -10,13 +10,13 @@
 | ID | 主题 | 优先级 | 状态 | 依赖 |
 |----|------|--------|------|------|
 | T1 | 上下文压缩(Compact)升级:对标 Claude Code 分级流水线 | 高 | `[ ]` | — |
-| T2 | CodeBuddy Provider 可信度评估 / 备选后端 | 中 | `[?]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b |
+| T2 | CodeBuddy Provider 可信度评估 / 备选后端 | 中 | `[?]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b;⚠️ 2026-07-07 `ck_` 额度耗尽(code 14019),需申请恢复 |
 | T3 | 跨多次 LLM 调用的 token usage 累加 helper | 中 | `[ ]` | — |
 | T4 | 流式 usage 累加对非标准网关不鲁棒(可修复 bug) | 高 | `[x]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2 |
 | T5 | benchmark 子模块 go.mod 钉死外部旧版,验证本地改动会误测过时代码 | 中 | `[ ]` | — |
 | T6 | 框架多处直接构造 `model.Request` 不设 Stream(已逐条复核:非静默失效,会显式报错;修法应在 provider 层兜底) | 中 | `[~]` | 见 T2 决策 |
 | T7 | llmflow 主循环:空 completion 被判非 final → 死循环(真 bug,已修复);benchmark hang 实测证伪 | 高 | `[x]` | 由 T6 定位挖出 |
-| T8 | summary_ondemand(摘要 + 按需检索)实跑取经,喂给 T1 | 中 | `[ ]` | 需 pgvector;关联 T1 |
+| T8 | summary_ondemand 实跑取经 + 详细 prompt 已落地验证(`WithDetailedContinuityPrompt`,commit b1497d09) | 中 | `[~]` | 关联 T1;详 pgmt 验证见 T8 正文 |
 | _(后续挖掘持续追加)_ | | | | |
 
 ---
@@ -30,8 +30,10 @@
 - **"WithGenerationConfig 用零值覆盖了 Stream:true 默认,是隐蔽缺陷"** → **查证为非 bug,不修**(见 [T7](#t7--llmflow-主循环空-completion-被判非-final--死循环真-bug已修复-) 剩余可选项)。iWiki 官方文档已把"默认非流式、要流式显式 `agent.WithStream(true)`"写成设计约定。
 - **"benchmark 钉死外部旧版,本地改动会误测过时代码"** → **结论成立,已充分记录**(见 [T5](#t5--benchmark-子模块-gomod-钉死外部旧版验证本地改动会误测过时代码-));同份数据 token 从 ~186k 回落到 ~18k 就是切回本地工作树后的真值。
 - **T1 可恢复压缩闭环** → **已端到端验证闭合**(见 T1"已坐实的基础")。压缩占位符带 event_id、`session_load` 能靠它取回原始内容,两端接缝对齐。
+- **T1 摘要 prompt 升级(详细连续性)** → **已落地为 `WithDetailedContinuityPrompt`**(commit b1497d09)+ **实测验证**。设计被验证正确(claude-sonnet-4.6 下详细摘要字符数达基线 74960 量级);但澄清了适用边界——"详细必然提升 ROUGE-L"不成立,只对弱模型/默认摘要弱/on-demand 检索场景有效,强模型+纯摘要直接回答反而被冗长拖累(见 T8 验证结论)。
+- **CodeBuddy 网关 `ck_` key 额度耗尽**(2026-07-07):实测验证 benchmark 时把额度跑光,`code 14019` "当前无可用 Token 额度"(claude 与 glm 均不可用)。需联系团队负责人/HRBP 申请额度(查看:`aitoken.woa.com`)。申请恢复前,任何依赖 codebuddy 网关的实测(含 benchmark 验证)无法进行。
 
-**下一步聚焦**:T8(summary_ondemand 实跑,和 T1 上下文压缩升级最相关)是当前最值得做、且不依赖已了结事项的方向。
+**下一步聚焦**:`ck_` 额度耗尽期间,优先做**不依赖网关**的方向:T1 剩余 gap 的"压缩熔断器"(纯框架代码 + mock 测试,无需 LLM 调用)或"可恢复裁剪"(`token_tailor` 硬删→可恢复)。额度恢复后再继续 benchmark 类验证。
 
 ---
 
@@ -389,6 +391,20 @@ model was called 19094 times in 300ms
 - T1 阶段 2 的"重档(全量 LLM 摘要)"应默认配套按需检索(`session_search`/`session_load`),否则超长上下文下质量塌陷。
 - 压缩强度要分级:短对话不压;中等上下文摘要 + 按需检索(性价比最高);超长上下文靠激进摘要 + 按需兜底。
 - 摘要 prompt 质量本身是杠杆:detailed prompt 能让纯 summary 逼近 long context,减少回捞频率(省 tool 调用往返)。
+
+### detailed prompt 实测验证结论(2026-07-07,已落地为 `WithDetailedContinuityPrompt`)
+
+我们加的 `WithDetailedContinuityPrompt`(commit b1497d09)用 codebuddy provider 在 LongMemEval 上跑了实测验证(两轮:glm-5.0 + claude-sonnet-4.6,benchmark 临时切本地 + codebuddy provider + inmemory 绕开 pgvector,跑完还原)。关键发现:
+
+**1. prompt 设计本身被验证正确(强模型下产出基线量级的 verbatim 摘要)。** claude-sonnet-4.6 下 detailed summary 字符数 53162–80795(平均 66010),达到基线报告 74960 的量级;而上一轮 glm-5.0 只有 6650 字符。证明九段式 prompt + verbatim 用户消息的指令有效,只要模型遵从度够就能产出基线量级详细摘要。上一轮 glm 跑不出提升的根因是模型不遵从(completion 几十 token 就停),不是 prompt 有问题。
+
+**2. 但"detailed 必然带来 ROUGE-L 提升"这个结论不成立,需澄清适用边界。** 在 claude-sonnet-4.6 这种强模型上,detailed 的 ROUGE-L 反而比 default 略低(同 3 case 0.267→0.184)。原因:基线报告那种 0.0473→0.2965 的大幅提升发生在"default 摘要太弱、模型抓不住关键事实"的弱模型场景;强模型即使 default 短摘要也能抓住关键事实(3 case 有 2 个 EM 命中,default ROUGE-L 已 0.267 远高于基线 0.0473),提升空间被压缩;且 detailed summary 太长(6 万字符)让回答 agent 倾向冗长回答,ROUGE-L 对长回答不友好,边际质量收益被惩罚抵消。
+
+**3. detailed prompt 真正的价值在 on-demand 检索场景(上一轮 glm 数据)。** detailed 的 ondemand 比 default 的 ondemand ROUGE-L 高 3 倍(0.1444 vs 0.0465)、Exact Match 0.60 vs 0.00。因为 detailed summary 大且信息密集,检索才有东西可搜;default summary 太短,检索也无米之炊。**这才是 detailed prompt 的甜蜜点**。
+
+**对 T1 的修正输入**:detailed prompt 不是"默认就该开"的银弹,而是**有条件的最优**——适合 (a) 弱模型 / default 摘要抓不住关键事实的场景,(b) 需要 verbatim 保留原始用户消息供后续 on-demand 检索的场景。对强模型 + 纯 summary 直接回答的场景,detailed 反而可能因冗长拖累 ROUGE-L。这与我们"默认行为不动、显式开启"的设计取向一致。后续 T1 分级压缩的"重档"若配 detailed,应同时配 on-demand 检索(detailed summary 越大越依赖检索放大价值)。
+
+> 注:实测中 codebuddy 网关 `ck_` key 额度耗尽(`code 14019`,claude 与 glm 均不可用),claude-sonnet-4.6 detailed 模式仅成功 3 case。3 case 已足以支撑上述结论(prompt 正确性 + 字符量级对齐基线),但 ROUGE-L 数值为小样本,趋势性参考。
 
 ### 待办
 
