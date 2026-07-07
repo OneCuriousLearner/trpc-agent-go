@@ -13,7 +13,7 @@
 | T2 | CodeBuddy Provider 可信度评估 / 备选后端 | 中 | `[?]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b;(2026-07-07 额度一度耗尽 `14019`,已换 key 恢复;推荐高性价比模型见 CLAUDE.md) |
 | T3 | 跨多次 LLM 调用的 token usage 累加 helper | 中 | `[ ]` | — |
 | T4 | 流式 usage 累加对非标准网关不鲁棒(可修复 bug) | 高 | `[x]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2 |
-| T5 | benchmark 默认钉本地版本(go.work 方案) | 中 | `[~]` | go.work 已推 fork(OneCuriousLearner/trpc-agent-go-benchmark,分支 feat/local-workspace)+ setup 脚本✅;待全流程验证 |
+| T5 | benchmark 默认钉本地版本(go.work 方案) | 中 | `[x]` | go.work 推 fork ✅ + setup 脚本 ✅ + 全流程验证通过(全新 clone,所有 trpc-agent-go 模块 => ../ 本地) |
 | T6 | 框架多处直接构造 `model.Request` 不设 Stream(已逐条复核:非静默失效,会显式报错;修法应在 provider 层兜底) | 中 | `[~]` | 见 T2 决策 |
 | T7 | llmflow 主循环:空 completion 被判非 final → 死循环(真 bug,已修复);benchmark hang 实测证伪 | 高 | `[x]` | 由 T6 定位挖出 |
 | T8 | summary_ondemand 实跑取经 + 详细 prompt 已落地验证(`WithDetailedContinuityPrompt`,commit b1497d09) | 中 | `[~]` | 关联 T1;详 pgmt 验证见 T8 正文 |
@@ -32,7 +32,7 @@
 - **T1 可恢复压缩闭环** → **已端到端验证闭合**(见 T1"已坐实的基础")。压缩占位符带 event_id、`session_load` 能靠它取回原始内容,两端接缝对齐。
 - **T1 摘要 prompt 升级(详细连续性)** → **已落地为 `WithDetailedContinuityPrompt`**(commit b1497d09)+ **实测验证**。设计被验证正确(claude-sonnet-4.6 下详细摘要字符数达基线 74960 量级);但澄清了适用边界——"详细必然提升 ROUGE-L"不成立,只对弱模型/默认摘要弱/on-demand 检索场景有效,强模型+纯摘要直接回答反而被冗长拖累(见 T8 验证结论)。
 - **CodeBuddy 网关 `ck_` key 额度**(2026-07-07):实测验证 benchmark 时一度耗尽(`code 14019`,claude 与 glm 均不可用);**已换 key 恢复**,glm-5.2/minimax-m3/kimi-k2.7/deepseek-v4-pro 实测均通。换 key 有个坑:当前 shell 的 `CODEBUDDY_API_KEY` 若残留旧 key,cb-chat/provider 不会重读 `~/.codebuddy.env`(见 CLAUDE.md "换 key 后的坑")。后续跑 benchmark **只用高性价比模型**(glm-5.2 等,见 CLAUDE.md),避免 claude 系虚高且易耗尽额度。
-- **T5 benchmark 默认钉本地**(2026-07-07):go.work 已推到用户 fork(`OneCuriousLearner/trpc-agent-go-benchmark`,分支 `feat/local-workspace`),commit 含 go.work + .gitignore(go.work.sum)。主仓库 `scripts/setup-benchmark-fork.sh` 帮协作者把 benchmark submodule 切到 fork 分支。本地验证:三块 benchmark build 全绿、`go list -m` 确认全解析本地。待全流程验证(全新 clone + 跑脚本)。详见 T5 正文。
+- **T5 benchmark 默认钉本地**(2026-07-07,完成 + 全流程验证):go.work 推到用户 fork(`OneCuriousLearner/trpc-agent-go-benchmark`,分支 `feat/local-workspace`,含主模块+13 子模块 replace)。主仓库 `scripts/setup-benchmark-fork.sh` 把 benchmark submodule 切到 fork 分支。**全流程验证通过**(派 agent 在 `/tmp/test/` 全新 clone + 跑脚本):`go list -m all` 确认**所有** trpc-agent-go 模块都 `=> ../` 本地、无一走外部,三块 benchmark build 全过,主仓库 build 不受影响。验证中发现 4 个 model provider 子模块初版漏 replace,已补全。详见 T5 正文。
 
 **下一步聚焦**:T1 核心收口(2026-07-07)——prompt 升级 + 熔断器已完成并验证,可恢复裁剪经查证不做(归口 flow 层 compaction),多档阈值作为可选后续(对框架价值有限,无 UI 反馈需求)。下一步:用 glm-5.2 小样本验证熔断器真实网关行为,之后转下一个 T(积累改动后再跑 benchmark)。
 
@@ -212,7 +212,7 @@ T4(流式 usage take-last)已于 7-01 修复并合入 `feat/lightai`。但 memor
 - 主仓库 `go build ./...` 不受影响(go.work 在 benchmark 子目录,不影响主仓库根命令)。
 - 三块 benchmark build 全过,`go list -m` 确认所有 trpc-agent-go 模块解析到本地(`=> ../`、`=> ../evaluation` 等)。
 
-**go.work 定稿内容**(提交到 fork 的 `benchmark/go.work`):
+**go.work 定稿内容**(提交到 fork 的 `benchmark/go.work`,2026-07-07 含 4 个 model provider 补全):
 ```
 go 1.25.5
 
@@ -232,10 +232,14 @@ replace (
 	trpc.group/trpc-go/trpc-agent-go/storage/postgres => ../storage/postgres
 	trpc.group/trpc-go/trpc-agent-go/storage/mysql => ../storage/mysql
 	trpc.group/trpc-go/trpc-agent-go/evaluation => ../evaluation
+	trpc.group/trpc-go/trpc-agent-go/model/anthropic => ../model/anthropic
+	trpc.group/trpc-go/trpc-agent-go/model/gemini => ../model/gemini
+	trpc.group/trpc-go/trpc-agent-go/model/ollama => ../model/ollama
+	trpc.group/trpc-go/trpc-agent-go/model/provider => ../model/provider
 	trpc.group/trpc-go/trpc-agent-go/knowledge/vectorstore/pgvector => ../knowledge/vectorstore/pgvector
 )
 ```
-注意:`../` 假定 benchmark 检出在 `trpc-agent-go/benchmark/`(git submodule 标准布局)。`evaluation`、`storage/mysql` 是 2026-07-07 补全的(summary 依赖 evaluation、memory 依赖 storage/mysql,不 replace 会走外部旧版误测)。
+注意:`../` 假定 benchmark 检出在 `trpc-agent-go/benchmark/`(git submodule 标准布局)。`evaluation`、`storage/mysql` 是 2026-07-07 初版补全的(summary 依赖 evaluation、memory 依赖 storage/mysql);`model/anthropic|gemini|ollama|provider` 4 个是验证后补全的(evaluation require 它们,不 replace 会走外部 v0.8.0)。**全流程验证**:派 agent 在 `/tmp/test/` 全新 clone + 跑脚本 + `go list -m all` 确认**所有** trpc-agent-go 模块都 `=> ../` 本地,无一走外部,三块 benchmark build 全过,主仓库 build 不受影响。
 
 ### 落地步骤(2026-07-07 已执行 1-2,3 已实现为脚本)
 
@@ -249,7 +253,7 @@ replace (
 - [x] go.work 内容设计 + 本地验证通过(2026-07-07,三块 benchmark build 全绿、`go list -m` 确认全解析本地)。
 - [x] 用户 fork + 推 go.work(fork: `OneCuriousLearner/trpc-agent-go-benchmark`,分支 `feat/local-workspace`)。
 - [x] `scripts/setup-benchmark-fork.sh` 实现(fork url 已填,非占位符)。
-- [ ] **待全流程验证**:全新 clone 主仓库 + 跑脚本 + 确认版本正确(派 agent 在 `/tmp/test/` 验证)。
+- [x] **全流程验证通过**(2026-07-07,派 agent 在 `/tmp/test/` 全新 clone + 跑脚本):所有 trpc-agent-go 模块 `=> ../` 本地、无一走外部、三块 benchmark build 全过、主仓库 build 不受影响。验证中发现 4 个 model provider 子模块漏 replace,已补全到 fork。
 - [ ] CI 是否跑本地 benchmark:另一维度,本方案只解决本地默认钉本地。
 
 ### 操作备忘(历史:临时改 go.mod,已被 go.work 方案取代)
