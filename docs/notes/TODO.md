@@ -9,7 +9,7 @@
 
 | ID | 主题 | 优先级 | 状态 | 依赖 |
 |----|------|--------|------|------|
-| T1 | 上下文压缩(Compact)升级:对标 Claude Code 分级流水线 | 高 | `[ ]` | — |
+| T1 | 上下文压缩(Compact)升级:对标 Claude Code 分级流水线 | 高 | `[~]` | 核心 gap 已完成(prompt 升级✅ b1497d09 / 熔断器✅ 3c64c6a9 / 可恢复裁剪查证不做);多档阈值可选后续 |
 | T2 | CodeBuddy Provider 可信度评估 / 备选后端 | 中 | `[?]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b;(2026-07-07 额度一度耗尽 `14019`,已换 key 恢复;推荐高性价比模型见 CLAUDE.md) |
 | T3 | 跨多次 LLM 调用的 token usage 累加 helper | 中 | `[ ]` | — |
 | T4 | 流式 usage 累加对非标准网关不鲁棒(可修复 bug) | 高 | `[x]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2 |
@@ -33,11 +33,13 @@
 - **T1 摘要 prompt 升级(详细连续性)** → **已落地为 `WithDetailedContinuityPrompt`**(commit b1497d09)+ **实测验证**。设计被验证正确(claude-sonnet-4.6 下详细摘要字符数达基线 74960 量级);但澄清了适用边界——"详细必然提升 ROUGE-L"不成立,只对弱模型/默认摘要弱/on-demand 检索场景有效,强模型+纯摘要直接回答反而被冗长拖累(见 T8 验证结论)。
 - **CodeBuddy 网关 `ck_` key 额度**(2026-07-07):实测验证 benchmark 时一度耗尽(`code 14019`,claude 与 glm 均不可用);**已换 key 恢复**,glm-5.2/minimax-m3/kimi-k2.7/deepseek-v4-pro 实测均通。换 key 有个坑:当前 shell 的 `CODEBUDDY_API_KEY` 若残留旧 key,cb-chat/provider 不会重读 `~/.codebuddy.env`(见 CLAUDE.md "换 key 后的坑")。后续跑 benchmark **只用高性价比模型**(glm-5.2 等,见 CLAUDE.md),避免 claude 系虚高且易耗尽额度。
 
-**下一步聚焦**:T1 剩余 gap 里,"压缩熔断器"和"摘要 prompt 升级"均已完成(见 T8 验证结论),"可恢复裁剪"经查证不推荐做(model 层精准可恢复不可行)。当前剩余可做项主要是"多档阈值"(单档 0.7→补 warning/error/blocking)。额度已恢复(高性价比模型见 CLAUDE.md),需要时可继续 benchmark 类验证。
+**下一步聚焦**:T1 核心收口(2026-07-07)——prompt 升级 + 熔断器已完成并验证,可恢复裁剪经查证不做(归口 flow 层 compaction),多档阈值作为可选后续(对框架价值有限,无 UI 反馈需求)。下一步:用 glm-5.2 小样本验证熔断器真实网关行为,之后转下一个 T(积累改动后再跑 benchmark)。
 
 ---
 
-## T1 — 上下文压缩(Compact)升级 ⭐
+## T1 — 上下文压缩(Compact)升级 ⭐ `[~]` 核心 gap 已完成
+
+> 2026-07-07 核心收口。对照 Claude Code 的分级压缩,框架已有相当成熟的体系(compaction 三档 + summary 注入 + 逼近上限同步刷新重建闭环 + session_load 可恢复)。本轮补了两个 gap:**摘要 prompt 升级**(`WithDetailedContinuityPrompt`,commit b1497d09,实测验证见 T8)、**压缩熔断器**(commit `3c64c6a9`)。**可恢复裁剪经查证不做**(model 层 `Message` 无 event_id 字段、精准可恢复不可行,归口 flow 层 compaction)。**多档阈值**作为可选后续(对框架价值有限,无 CLI 式 UI 反馈需求)。
 
 ### 背景与动机
 
