@@ -174,6 +174,38 @@ CB_MODEL=claude-haiku-4.5 cb-chat "hi"
 
 脚本内部引用 `$CODEBUDDY_API_KEY` 发 curl,调用方不接触明文;环境变量为空时会自行 `source ~/.codebuddy.env`(所以重启 claude 后也能用,不依赖 session 环境)。
 
+**推荐使用高性价比模型**(网关上 usage 基本可信、成本低,见 `docs/notes/codebuddy-gateway.md` §4b 模型族差异):
+
+| 模型 ID | 说明 |
+|---------|------|
+| `glm-5.2` | GLM 最新,usage 轻微失真(~2x),通用首选 |
+| `minimax-m3` | MiniMax,实测可用 |
+| `kimi-k2.7` | Kimi,usage 基本正常(<1x) |
+| `deepseek-v4-pro` | DeepSeek,能力强;usage 中等(~4x),注意成本 |
+
+> 非 `claude-*` 系的模型 usage 失真轻,适合跑 benchmark / 长上下文验证。**避免用 `claude-*` 跑大规模实测**——Claude 系网关 usage 虚高 ~7x(见 `docs/notes/codebuddy-gateway.md` §4b),且单次 long-context 调用易耗尽额度。默认模型 `claude-sonnet-4.6` 仅用于小规模交互验证。
+
+**换 key 后的坑(重要)**:`~/.codebuddy.env` 更新后,若当前 shell 的 `CODEBUDDY_API_KEY` 环境变量仍残留**旧 key**(rc 已加载过),`cb-chat` 和 `model/codebuddy` provider 会优先用环境变量里的旧值、不重读文件。换 key 后若实测仍报 `14019`(额度耗尽),用 `env -u CODEBUDDY_API_KEY cb-chat -m glm-5.2 'hi'` 清掉旧环境变量强制读新文件验证;或重开 shell 让 rc 重新加载。框架跑 `go run` 时同理,可 `env -u CODEBUDDY_API_KEY go run .` 强制读新 key。
+
 **跑 Go demo / 测试**时,框架的 `model/codebuddy` provider 自己 `os.Getenv("CODEBUDDY_API_KEY")`,只要 rc 已加载 key,直接 `go run .` 即可,Claude 无需接触 key。
 
-**行为规范(Claude 必须遵守)**:绝不 `echo $CODEBUDDY_API_KEY` / `printenv` / `set -x` / `cat ~/.codebuddy.env` / `env | grep CODEBUDDY`——任何一种都会把明文泄露进 transcript。需要诊断网关问题时,只看 `cb-chat` 返回的 SSE 流或错误码(如 `11101`/`11102`,含义见 `docs/notes/codebuddy-gateway.md` §4)。需要确认"key 是否已加载"时,用 `cb-chat 'hi'` 实发一次请求来验证,而非打印变量。
+**行为规范(Claude 必须遵守)**:绝不 `echo $CODEBUDDY_API_KEY` / `printenv` / `set -x` / `cat ~/.codebuddy.env` / `env | grep CODEBUDDY`——任何一种都会把明文泄露进 transcript。需要诊断网关问题时,只看 `cb-chat` 返回的 SSE 流或错误码(如 `11101`/`11102`/`14019`,含义见 `docs/notes/codebuddy-gateway.md` §4)。需要确认"key 是否已加载"时,用 `cb-chat 'hi'` 实发一次请求来验证,而非打印变量。
+
+## gvm cd 钩子与 Claude Code/tclaude shell 快照守卫
+
+`~/.bashrc` 末尾有一段 `CLAUDECODE` 守卫(仅对 `CLAUDECODE=1` 的 shell 生效):
+
+```bash
+if [[ -n "$CLAUDECODE" ]]; then
+	unset -f cd 2>/dev/null
+fi
+```
+
+**背景**:Claude Code/tclaude 生成 bash 快照时用 `grep -vE '^_[^_]'` 过滤函数,会误丢 gvm 的 `_encode`/`_decode`(单下划线前缀被当成补全函数),却保留调用它们的 gvm `cd` 钩子。于是每条 `cd ...` 命令都触发 `cd` 钩子 → `_encode/_decode: command not found`。守卫在快照 shell 里卸掉 `cd` 钩子、恢复 builtin `cd`,从根上消除触发点。
+
+**生效条件**:tclaude 每个会话只创建一次快照并复用,改完 `.bashrc` 后**必须重启会话**才会用上新快照。验证方式:执行带 `cd` 的命令(如 `cd ... && wc -l *.ts`)不再出现 `_encode/_decode` 报错即生效;`/root/.tclaude/shell-snapshots/` 里新快照不含 `cd` 函数(函数数比旧快照少 1)。
+
+**影响范围(已确认)**:
+- 交互终端是 zsh(走 `~/.zshrc`,无此守卫),gvm 按目录自动切 Go 版本在真实终端照常工作,不受影响。
+- Claude Code 的 bash 快照里 gvm 的 PATH/Go 仍在,只是没了 `cd` 钩子;手动 `gvm use` 仍可用,`go` 命令不受影响。
+- `_encode`/`_decode` 在快照里仍被过滤丢弃(无法本地根治),但因无人调用,不再报错。彻底根治需 Anthropic 上游把 `ShellSnapshot.ts` 的 `^_[^_]` 启发式换成按 `complete -F` 注册表过滤,本地无解。

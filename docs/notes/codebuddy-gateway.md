@@ -85,7 +85,7 @@ CLI 报告的完整清单(`model/codebuddy/models.go` 里有导出常量):
 - **GPT**: `gpt-5.5`、`gpt-5.4`、`gpt-5.3-codex`、`gpt-5.1-codex`、`gpt-5.1-codex-mini`
 - **GLM**: `glm-5.2-ioa`、`glm-5v-turbo-ioa`、`glm-5.0-ioa`、`glm-4.7-ioa`
 - **MiniMax**: `minimax-m3-ioa`、`minimax-m2.7-ioa`、`minimax-m2.5-ioa`
-- **Kimi**: `kimi-k2.6-ioa`
+- **Kimi**: `kimi-k2.7-ioa`(2026-07-07 实测 `kimi-k2.7` 带不带 `-ioa` 后缀均通)、`kimi-k2.6-ioa`
 - **Hunyuan**: `hy3-preview-agent-ioa`
 - **DeepSeek**: `deepseek-v4-pro-ioa`、`deepseek-v4-flash-ioa`、`deepseek-v3-2-volc-ioa`
 

@@ -10,7 +10,7 @@
 | ID | 主题 | 优先级 | 状态 | 依赖 |
 |----|------|--------|------|------|
 | T1 | 上下文压缩(Compact)升级:对标 Claude Code 分级流水线 | 高 | `[ ]` | — |
-| T2 | CodeBuddy Provider 可信度评估 / 备选后端 | 中 | `[?]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b;⚠️ 2026-07-07 `ck_` 额度耗尽(code 14019),需申请恢复 |
+| T2 | CodeBuddy Provider 可信度评估 / 备选后端 | 中 | `[?]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b;(2026-07-07 额度一度耗尽 `14019`,已换 key 恢复;推荐高性价比模型见 CLAUDE.md) |
 | T3 | 跨多次 LLM 调用的 token usage 累加 helper | 中 | `[ ]` | — |
 | T4 | 流式 usage 累加对非标准网关不鲁棒(可修复 bug) | 高 | `[x]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2 |
 | T5 | benchmark 子模块 go.mod 钉死外部旧版,验证本地改动会误测过时代码 | 中 | `[ ]` | — |
@@ -31,9 +31,9 @@
 - **"benchmark 钉死外部旧版,本地改动会误测过时代码"** → **结论成立,已充分记录**(见 [T5](#t5--benchmark-子模块-gomod-钉死外部旧版验证本地改动会误测过时代码-));同份数据 token 从 ~186k 回落到 ~18k 就是切回本地工作树后的真值。
 - **T1 可恢复压缩闭环** → **已端到端验证闭合**(见 T1"已坐实的基础")。压缩占位符带 event_id、`session_load` 能靠它取回原始内容,两端接缝对齐。
 - **T1 摘要 prompt 升级(详细连续性)** → **已落地为 `WithDetailedContinuityPrompt`**(commit b1497d09)+ **实测验证**。设计被验证正确(claude-sonnet-4.6 下详细摘要字符数达基线 74960 量级);但澄清了适用边界——"详细必然提升 ROUGE-L"不成立,只对弱模型/默认摘要弱/on-demand 检索场景有效,强模型+纯摘要直接回答反而被冗长拖累(见 T8 验证结论)。
-- **CodeBuddy 网关 `ck_` key 额度耗尽**(2026-07-07):实测验证 benchmark 时把额度跑光,`code 14019` "当前无可用 Token 额度"(claude 与 glm 均不可用)。需联系团队负责人/HRBP 申请额度(查看:`aitoken.woa.com`)。申请恢复前,任何依赖 codebuddy 网关的实测(含 benchmark 验证)无法进行。
+- **CodeBuddy 网关 `ck_` key 额度**(2026-07-07):实测验证 benchmark 时一度耗尽(`code 14019`,claude 与 glm 均不可用);**已换 key 恢复**,glm-5.2/minimax-m3/kimi-k2.7/deepseek-v4-pro 实测均通。换 key 有个坑:当前 shell 的 `CODEBUDDY_API_KEY` 若残留旧 key,cb-chat/provider 不会重读 `~/.codebuddy.env`(见 CLAUDE.md "换 key 后的坑")。后续跑 benchmark **只用高性价比模型**(glm-5.2 等,见 CLAUDE.md),避免 claude 系虚高且易耗尽额度。
 
-**下一步聚焦**:`ck_` 额度耗尽期间,优先做**不依赖网关**的方向:T1 剩余 gap 的"压缩熔断器"(纯框架代码 + mock 测试,无需 LLM 调用)或"可恢复裁剪"(`token_tailor` 硬删→可恢复)。额度恢复后再继续 benchmark 类验证。
+**下一步聚焦**:T1 剩余 gap 里挑一个推进——"压缩熔断器"(纯框架代码 + mock 测试,无需 LLM 调用,跟 [T7](#t7--llmflow-主循环空-completion-被判非-final--死循环真-bug已修复-) 同属健壮性)或"可恢复裁剪"(`token_tailor` 硬删→可恢复,改动面较大)。额度已恢复,需要时可继续 benchmark 类验证,但优先选不依赖网关的方向。
 
 ---
 
@@ -404,7 +404,7 @@ model was called 19094 times in 300ms
 
 **对 T1 的修正输入**:detailed prompt 不是"默认就该开"的银弹,而是**有条件的最优**——适合 (a) 弱模型 / default 摘要抓不住关键事实的场景,(b) 需要 verbatim 保留原始用户消息供后续 on-demand 检索的场景。对强模型 + 纯 summary 直接回答的场景,detailed 反而可能因冗长拖累 ROUGE-L。这与我们"默认行为不动、显式开启"的设计取向一致。后续 T1 分级压缩的"重档"若配 detailed,应同时配 on-demand 检索(detailed summary 越大越依赖检索放大价值)。
 
-> 注:实测中 codebuddy 网关 `ck_` key 额度耗尽(`code 14019`,claude 与 glm 均不可用),claude-sonnet-4.6 detailed 模式仅成功 3 case。3 case 已足以支撑上述结论(prompt 正确性 + 字符量级对齐基线),但 ROUGE-L 数值为小样本,趋势性参考。
+> 注:实测中 codebuddy 网关 `ck_` key 额度一度耗尽(`code 14019`,claude 与 glm 均不可用),claude-sonnet-4.6 detailed 模式仅成功 3 case。3 case 已足以支撑上述结论(prompt 正确性 + 字符量级对齐基线),但 ROUGE-L 数值为小样本,趋势性参考。(2026-07-07 额度已换 key 恢复,后续验证改用 glm-5.2 等高性价比模型。)
 
 ### 待办
 
