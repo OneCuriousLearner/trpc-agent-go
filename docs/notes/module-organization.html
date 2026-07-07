@@ -1,0 +1,933 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>五个模块怎么搭到一起 · trpc-agent-go</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#F4F5F7;
+    --surface:#FFFFFF;
+    --ink:#14181F;
+    --ink-2:#5B6270;
+    --ink-3:#8A90A0;
+    --rule:#D9DCE2;
+    --rule-2:#E7E9EE;
+    --blue:#0B3D6E;
+    --blue-2:#1B6FB8;
+    --signal:#E8743B;
+    --signal-2:#F2A07A;
+    --go:#00ADD8;
+    --maxw:1120px;
+  }
+
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font-family:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+    font-size:17px;
+    line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+    text-rendering:optimizeLegibility;
+  }
+
+  body::before{
+    content:"";
+    position:fixed;
+    inset:0;
+    background-image:
+      linear-gradient(rgba(11,61,110,0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(11,61,110,0.035) 1px, transparent 1px);
+    background-size:32px 32px;
+    pointer-events:none;
+    z-index:0;
+  }
+
+  .mo-wrap{position:relative; z-index:1; max-width:var(--maxw); margin:0 auto; padding:0 28px}
+
+  /* ---- topbar ---- */
+  .mo-topbar{
+    border-bottom:1px solid var(--rule);
+    background:rgba(244,245,247,0.9);
+    backdrop-filter:blur(6px);
+    position:sticky; top:0; z-index:50;
+  }
+  .mo-topbar .mo-wrap{
+    display:flex; align-items:center; justify-content:space-between;
+    height:54px;
+  }
+  .mo-mark{
+    font-family:'JetBrains Mono',monospace;
+    font-size:12px; font-weight:600;
+    letter-spacing:0.04em;
+    color:var(--blue);
+    display:flex; align-items:center; gap:10px;
+  }
+  .mo-mark .dot{
+    width:9px; height:9px; border-radius:2px;
+    background:var(--signal);
+    box-shadow:0 0 0 3px rgba(232,116,59,0.18);
+  }
+  .mo-mark span{color:var(--ink-2); font-weight:400}
+  .mo-topnav{
+    font-family:'IBM Plex Sans',sans-serif;
+    font-size:14px; color:var(--ink-2);
+    display:flex; gap:20px;
+  }
+  .mo-topnav a{color:var(--ink-2); text-decoration:none; transition:color .15s}
+  .mo-topnav a:hover{color:var(--signal)}
+
+  /* ---- hero ---- */
+  .mo-hero{padding:96px 0 72px; border-bottom:1px solid var(--rule)}
+  .mo-eyebrow{
+    font-family:'JetBrains Mono',monospace;
+    font-size:11.5px; font-weight:500;
+    letter-spacing:0.14em; text-transform:uppercase;
+    color:var(--signal);
+    display:inline-flex; align-items:center; gap:8px;
+    margin-bottom:28px;
+  }
+  .mo-eyebrow::before{
+    content:""; width:24px; height:1px; background:var(--signal);
+  }
+  .mo-hero h1{
+    font-family:'Space Grotesk',sans-serif;
+    font-weight:600;
+    font-size:clamp(40px, 7vw, 76px);
+    line-height:1.04;
+    letter-spacing:-0.025em;
+    margin:0 0 28px;
+    color:var(--ink);
+  }
+  .mo-hero h1 .em{color:var(--blue)}
+  .mo-hero h1 .accent{
+    color:var(--signal);
+    font-style:italic;
+    font-weight:500;
+  }
+  .mo-hero .lede{
+    max-width:720px;
+    font-size:19px; line-height:1.6;
+    color:var(--ink-2);
+    margin:0 0 44px;
+  }
+  .mo-hero .lede strong{color:var(--ink); font-weight:600}
+
+  /* blueprint figure card */
+  .mo-fig{
+    position:relative;
+    background:var(--surface);
+    border:1px solid var(--rule);
+    border-style:dashed;
+    border-radius:8px;
+    padding:30px 32px 28px;
+    font-family:'JetBrains Mono',monospace;
+    font-size:13.5px; line-height:1.9;
+    color:var(--ink);
+    overflow:hidden;
+  }
+  .mo-fig::before, .mo-fig::after,
+  .mo-fig .cross-tl, .mo-fig .cross-br{
+    content:""; position:absolute; width:10px; height:10px;
+    background:
+      linear-gradient(var(--ink-3),var(--ink-3)) center/10px 1px no-repeat,
+      linear-gradient(var(--ink-3),var(--ink-3)) center/1px 10px no-repeat;
+  }
+  .mo-fig::before{top:8px; left:8px}
+  .mo-fig::after{top:8px; right:8px}
+  .mo-fig .cross-tl{bottom:8px; left:8px}
+  .mo-fig .cross-br{bottom:8px; right:8px}
+  .mo-fig .figtag{
+    position:absolute; top:14px; right:18px;
+    font-size:10.5px; color:var(--ink-3); letter-spacing:0.08em;
+  }
+  .mo-fig pre{margin:0; white-space:pre; overflow-x:auto}
+  .mo-fig .hl{color:var(--go); font-weight:500}
+  .mo-fig .arr{color:var(--signal)}
+  .mo-fig .dim{color:var(--ink-3)}
+  .mo-fig .note{color:var(--ink-2)}
+
+  /* ---- section shell ---- */
+  .mo-section{padding:84px 0; border-bottom:1px solid var(--rule)}
+  .mo-sectionhead{margin-bottom:52px; max-width:780px}
+  .mo-sectionhead .mo-eyebrow{margin-bottom:18px}
+  .mo-sectionhead h2{
+    font-family:'Space Grotesk',sans-serif;
+    font-weight:600;
+    font-size:clamp(28px,4vw,40px);
+    line-height:1.12;
+    letter-spacing:-0.02em;
+    margin:0 0 16px;
+    color:var(--ink);
+  }
+  .mo-sectionhead p{
+    font-size:18px; color:var(--ink-2); margin:0; line-height:1.6;
+  }
+
+  /* ---- module cards ---- */
+  .mo-modgrid{display:grid; gap:28px}
+  .mo-mod{
+    position:relative;
+    background:var(--surface);
+    border:1px solid var(--rule);
+    border-radius:10px;
+    padding:34px 36px 30px;
+    transition:transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+  }
+  .mo-mod:hover{
+    transform:translateY(-2px);
+    box-shadow:0 14px 32px -18px rgba(11,61,110,0.22);
+    border-color:var(--rule-2);
+  }
+  .mo-mod .mod-tag{
+    font-family:'JetBrains Mono',monospace;
+    font-size:11px; font-weight:500;
+    letter-spacing:0.12em; text-transform:uppercase;
+    color:var(--signal);
+    margin-bottom:10px;
+  }
+  .mo-mod .mod-tag .num{color:var(--ink-3); margin-right:8px}
+  .mo-mod h3{
+    font-family:'Space Grotesk',sans-serif;
+    font-weight:600;
+    font-size:27px;
+    letter-spacing:-0.015em;
+    margin:0 0 8px;
+    color:var(--ink);
+  }
+  .mo-mod h3 .en{
+    font-family:'JetBrains Mono',monospace;
+    font-size:15px; color:var(--ink-3); font-weight:500;
+    margin-left:10px; letter-spacing:0;
+  }
+  .mo-mod .mod-role{
+    font-size:17px; color:var(--ink-2);
+    margin:0 0 20px;
+  }
+  .mo-metaphor{
+    background:rgba(232,116,59,0.06);
+    border-left:3px solid var(--signal);
+    border-radius:0 6px 6px 0;
+    padding:14px 18px;
+    margin:0 0 22px;
+    font-size:15.5px; color:var(--ink); line-height:1.55;
+  }
+  .mo-metaphor .lab{
+    font-family:'JetBrains Mono',monospace;
+    font-size:11px; color:var(--signal);
+    letter-spacing:0.08em; text-transform:uppercase;
+    display:block; margin-bottom:4px;
+  }
+  .mo-metaphor strong{color:var(--blue); font-weight:600}
+
+  .mo-cares{
+    background:#FAFBFC;
+    border:1px solid var(--rule-2);
+    border-radius:6px;
+    padding:16px 20px;
+    margin:0 0 22px;
+  }
+  .mo-cares .ct{
+    font-family:'JetBrains Mono',monospace;
+    font-size:11px; color:var(--ink-3);
+    letter-spacing:0.08em; text-transform:uppercase;
+    margin-bottom:10px;
+  }
+  .mo-cares ul{margin:0; padding:0; list-style:none; display:grid; gap:8px}
+  .mo-cares li{
+    font-size:15.5px; line-height:1.55; color:var(--ink);
+    padding-left:18px; position:relative;
+  }
+  .mo-cares li::before{
+    content:""; position:absolute; left:0; top:10px;
+    width:8px; height:1px; background:var(--signal);
+  }
+  .mo-cares li code{
+    font-family:'JetBrains Mono',monospace;
+    font-size:13px; color:var(--blue);
+    background:rgba(11,61,110,0.06);
+    padding:1px 5px; border-radius:3px;
+  }
+
+  .mo-modpoints{display:grid; gap:10px; margin:0; padding:0; list-style:none}
+  .mo-modpoints li{
+    font-size:15.5px; line-height:1.6; color:var(--ink);
+    padding-left:20px; position:relative;
+  }
+  .mo-modpoints li::before{
+    content:""; position:absolute; left:0; top:10px;
+    width:8px; height:1px; background:var(--signal);
+  }
+  .mo-modpoints li code{
+    font-family:'JetBrains Mono',monospace;
+    font-size:13px; color:var(--blue);
+    background:rgba(11,61,110,0.06);
+    padding:1px 5px; border-radius:3px;
+  }
+
+  /* ---- MCP two-column compare ---- */
+  .mo-compare{
+    display:grid; grid-template-columns:1fr 1fr; gap:24px;
+    margin-top:8px;
+  }
+  .mo-col{
+    border:1px solid var(--rule);
+    border-radius:8px;
+    padding:24px 26px;
+    background:var(--surface);
+  }
+  .mo-col h4{
+    font-family:'Space Grotesk',sans-serif;
+    font-weight:600; font-size:19px;
+    margin:0 0 4px; color:var(--ink);
+  }
+  .mo-col .col-sub{
+    font-family:'IBM Plex Sans',sans-serif;
+    font-size:14px; color:var(--signal);
+    margin-bottom:16px;
+  }
+  .mo-col dl{margin:0; display:grid; gap:4px}
+  .mo-col dt{
+    font-family:'JetBrains Mono',monospace;
+    font-size:11px; color:var(--ink-3);
+    letter-spacing:0.06em; text-transform:uppercase;
+    margin-top:10px;
+  }
+  .mo-col dd{margin:0; font-size:15px; color:var(--ink); line-height:1.5}
+
+  /* ---- sequence (numbered timeline) ---- */
+  .mo-seq{display:grid; gap:0; position:relative}
+  .mo-seq::before{
+    content:""; position:absolute;
+    left:23px; top:18px; bottom:18px;
+    width:1px; background:var(--rule);
+  }
+  .mo-step{
+    display:grid;
+    grid-template-columns:48px 1fr;
+    gap:18px;
+    padding:14px 0;
+    position:relative;
+  }
+  .mo-step .n{
+    font-family:'JetBrains Mono',monospace;
+    font-size:13px; font-weight:600;
+    color:var(--signal);
+    background:var(--bg);
+    border:1px solid var(--rule);
+    border-radius:50%;
+    width:32px; height:32px;
+    display:flex; align-items:center; justify-content:center;
+    z-index:2; margin-left:8px;
+  }
+  .mo-step .body{padding-top:5px}
+  .mo-step .body strong{
+    font-family:'Space Grotesk',sans-serif;
+    font-weight:600; font-size:17px;
+    color:var(--ink); display:block; margin-bottom:3px;
+  }
+  .mo-step .body span{
+    font-size:15.5px; color:var(--ink-2); line-height:1.6;
+  }
+  .mo-step .body code{
+    font-family:'JetBrains Mono',monospace;
+    font-size:13px; color:var(--blue);
+    background:rgba(11,61,110,0.06);
+    padding:1px 5px; border-radius:3px;
+  }
+
+  /* ---- wiring links (signature) ---- */
+  .mo-wiregrid{display:grid; gap:0; margin-top:8px}
+  .mo-wire{
+    display:grid;
+    grid-template-columns:minmax(0,1fr) 1.5fr minmax(0,1fr);
+    align-items:center;
+    gap:0;
+    padding:24px 0;
+    border-bottom:1px solid var(--rule-2);
+    position:relative;
+  }
+  .mo-wire:last-child{border-bottom:none}
+  .mo-wire .node{
+    background:var(--surface);
+    border:1px solid var(--rule);
+    border-radius:8px;
+    padding:16px 16px;
+    text-align:center;
+    transition:border-color .2s, transform .2s;
+  }
+  .mo-wire .node .nt{
+    font-family:'Space Grotesk',sans-serif;
+    font-weight:600; font-size:15.5px; color:var(--blue);
+    line-height:1.3;
+  }
+  .mo-wire .node.right .nt{color:var(--go)}
+  .mo-wire .node .ns{
+    display:block; font-size:12px; color:var(--ink-3);
+    margin-top:5px; font-family:'IBM Plex Sans',sans-serif;
+  }
+  .mo-wire .wire-mid{
+    position:relative;
+    height:40px;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .mo-wire .wire-line{
+    position:absolute; left:0; right:0; top:50%; height:2px;
+    background:linear-gradient(90deg,
+      var(--signal) 0%, var(--signal) 50%, var(--signal-2) 100%);
+    transform-origin:left center;
+    transform:translateY(-50%) scaleX(0);
+    transition:transform .9s cubic-bezier(.7,0,.3,1);
+  }
+  .mo-wire .wire-line::before, .mo-wire .wire-line::after{
+    content:""; position:absolute; top:50%;
+    width:7px; height:7px; border-radius:50%;
+    background:var(--signal);
+    transform:translateY(-50%);
+  }
+  .mo-wire .wire-line::before{left:-3px}
+  .mo-wire .wire-line::after{right:-3px; background:var(--signal-2)}
+  .mo-wire .wire-label{
+    position:relative; z-index:2;
+    background:var(--bg);
+    padding:3px 12px;
+    font-family:'IBM Plex Sans',sans-serif;
+    font-size:13px; color:var(--signal);
+    font-weight:500;
+  }
+  .mo-wire .why{
+    font-family:'IBM Plex Sans',sans-serif;
+    font-size:15px; color:var(--ink-2);
+    line-height:1.55;
+    padding-left:18px;
+  }
+  .mo-wire .why .id{
+    font-family:'JetBrains Mono',monospace;
+    font-size:11px; color:var(--signal);
+    display:block; margin-bottom:4px;
+    letter-spacing:0.06em;
+  }
+  .mo-wire .why strong{color:var(--ink); font-weight:600}
+  .mo-wire.in .wire-line{transform:translateY(-50%) scaleX(1)}
+  .mo-wire.in .node{border-color:var(--signal-2)}
+  @media (max-width:760px){
+    .mo-wire{grid-template-columns:1fr; gap:8px}
+    .mo-wire .wire-mid{height:auto; padding:4px 0}
+    .mo-wire .wire-line{display:none}
+  }
+
+  /* ---- run lifecycle ---- */
+  .mo-rungrid{display:grid; grid-template-columns:1.3fr 1fr; gap:32px; align-items:start}
+  @media (max-width:860px){.mo-rungrid{grid-template-columns:1fr}}
+  .mo-cancel{
+    background:var(--surface);
+    border:1px solid var(--rule);
+    border-radius:10px;
+    padding:26px 28px;
+  }
+  .mo-cancel h4{
+    font-family:'Space Grotesk',sans-serif;
+    font-weight:600; font-size:19px;
+    margin:0 0 14px; color:var(--ink);
+  }
+  .mo-cancel .cancel-fig{
+    font-family:'JetBrains Mono',monospace;
+    font-size:13px; line-height:1.8;
+    background:#FAFBFC; border:1px solid var(--rule-2);
+    border-radius:6px; padding:14px 16px;
+    margin:16px 0; color:var(--ink);
+    overflow-x:auto;
+  }
+  .mo-cancel .cancel-fig .arr{color:var(--signal)}
+  .mo-cancel .cancel-fig .cm{color:var(--ink-3)}
+  .mo-cancel p{font-size:15.5px; color:var(--ink-2); margin:0; line-height:1.6}
+
+  /* ---- design notes ---- */
+  .mo-notes-grid{display:grid; gap:16px}
+  .mo-note{
+    background:var(--surface);
+    border:1px solid var(--rule);
+    border-left:3px solid var(--signal);
+    border-radius:0 8px 8px 0;
+    padding:18px 22px;
+  }
+  .mo-note h4{
+    font-family:'Space Grotesk',sans-serif;
+    font-weight:600; font-size:17px;
+    margin:0 0 6px; color:var(--ink);
+  }
+  .mo-note p{margin:0; font-size:15.5px; color:var(--ink-2); line-height:1.6}
+  .mo-note code{
+    font-family:'JetBrains Mono',monospace;
+    font-size:13px; color:var(--blue);
+    background:rgba(11,61,110,0.06);
+    padding:1px 5px; border-radius:3px;
+  }
+
+  /* ---- footer ---- */
+  .mo-foot{
+    padding:48px 0 64px;
+    font-family:'JetBrains Mono',monospace;
+    font-size:12px; color:var(--ink-3);
+    line-height:1.7;
+  }
+  .mo-foot a{color:var(--blue); text-decoration:none; border-bottom:1px solid var(--rule)}
+  .mo-foot a:hover{color:var(--signal); border-color:var(--signal-2)}
+  .mo-foot .mo-wrap{display:flex; justify-content:space-between; flex-wrap:wrap; gap:16px}
+
+  /* ---- reveal motion ---- */
+  .mo-reveal{opacity:0; transform:translateY(16px); transition:opacity .6s ease, transform .6s ease}
+  .mo-reveal.is-visible{opacity:1; transform:none}
+
+  @media (prefers-reduced-motion: reduce){
+    html{scroll-behavior:auto}
+    .mo-reveal{opacity:1; transform:none; transition:none}
+    .mo-wire .wire-line{transform:translateY(-50%) scaleX(1); transition:none}
+    .mo-mod{transition:none}
+  }
+
+  @media (max-width:760px){
+    .mo-wrap{padding:0 18px}
+    .mo-hero{padding:64px 0 48px}
+    .mo-section{padding:56px 0}
+    .mo-mod{padding:26px 22px}
+    .mo-compare{grid-template-columns:1fr}
+    .mo-topnav{display:none}
+  }
+</style>
+</head>
+<body>
+
+<header class="mo-topbar">
+  <div class="mo-wrap">
+    <div class="mo-mark"><span class="dot"></span>模块怎么搭 <span>/ trpc-agent-go</span></div>
+    <nav class="mo-topnav">
+      <a href="#modules">五个模块</a>
+      <a href="#sequence">调用时序</a>
+      <a href="#wiring">接线图</a>
+      <a href="#lifecycle">一次调用</a>
+      <a href="#notes">设计点</a>
+    </nav>
+  </div>
+</header>
+
+<main>
+
+  <!-- ============ HERO ============ -->
+  <section class="mo-hero">
+    <div class="mo-wrap">
+      <div class="mo-eyebrow">写给改框架的人 · 2026-07-07 核实</div>
+      <h1>五个模块，<br>怎么 <span class="accent">搭到一起</span>。</h1>
+      <p class="lede">
+        trpc-agent-go 把<strong>工具、MCP、技能、会话、记忆</strong>五样东西，
+        在一次调用里拼成一个整体交给 Agent 用。Agent 干活时，
+        工具又反过来找会话和记忆拿数据。<strong>这条来回的通路</strong>，就是理解整个框架的钥匙。
+      </p>
+
+      <div class="mo-fig">
+        <span class="cross-tl"></span><span class="cross-br"></span>
+        <span class="figtag">图 1 · 一次调用怎么走</span>
+<pre>用户发一条消息进来
+  <span class="arr">│</span>
+  <span class="arr">├─</span> 先把这次对话的草稿本翻出来     <span class="arr">──►</span> <span class="hl">会话服务</span>     <span class="cm">// 有就加载，没有就新建</span>
+  <span class="arr">├─</span> 把几样东西打包成一个执行上下文
+  <span class="arr">│</span>   里面塞好：会话、记忆、工具、技能
+  <span class="arr">│</span>
+  <span class="arr">├─</span> 让 Agent 开始干活  <span class="arr">◄──</span>  工具要数据时，从这个上下文里找
+  <span class="arr">│</span>   <span class="note">└─ 比如记忆工具会从上下文里拿到记忆服务，搜索工具会拿到会话服务</span>
+  <span class="arr">│</span>
+  <span class="arr">└─</span> Agent 干完，做收尾            <span class="arr">──►</span> 触发记忆提取 · 把对话丢给外部记忆平台</pre>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ============ MODULES ============ -->
+  <section class="mo-section" id="modules">
+    <div class="mo-wrap">
+      <div class="mo-sectionhead mo-reveal">
+        <div class="mo-eyebrow">第一部分 · 五个模块</div>
+        <h2>五样东西分别是什么</h2>
+        <p>先别管接口名，用大白话讲清楚每个模块是干嘛的。源码里的英文名字放在括号里，方便你去代码里对照。</p>
+      </div>
+
+      <div class="mo-modgrid">
+
+        <!-- TOOLS -->
+        <article class="mo-mod mo-reveal">
+          <div class="mod-tag"><span class="num">模块一</span>工具系统</div>
+          <h3>工具箱<span class="en">Tools</span></h3>
+          <p class="mod-role">Agent 干活用的扳手、螺丝刀。框架定了一套标准接口，让任何工具都能挂进来给模型调用。</p>
+          <div class="mo-metaphor">
+            <span class="lab">打个比方</span>
+            一个工具最起码得有张<strong>说明书</strong>——叫什么名字、干什么用、要什么参数。能被调用的工具，就多一个「执行」能力。能边跑边吐结果的工具，就再加个「流式」能力。一把把工具打包成一盒，就是<strong>工具箱</strong>。
+          </div>
+          <div class="mo-cares">
+            <div class="ct">这套系统还管这几件事</div>
+            <ul>
+              <li><strong>谁能被看到</strong>：决定哪些工具对模型可见（<code>filter</code> 过滤）</li>
+              <li><strong>能不能执行</strong>：工具真要跑前过一道权限（<code>permission</code>），不让跑就拦下</li>
+              <li><strong>失败重试</strong>：工具临时报错时自动重试（<code>retry</code>）</li>
+              <li><strong>执行前后插手</strong>：跑之前能改参数，跑之后能改结果（<code>callbacks</code> 回调钩子）</li>
+              <li><strong>多个结果合并</strong>：并行调多个工具时把结果拼起来（<code>merge</code>）</li>
+            </ul>
+          </div>
+          <p style="font-size:15.5px;color:var(--ink-2);margin:0;line-height:1.6">
+            最常用的工具是<strong>函数工具</strong>（<code>function</code>），你写个 Go 函数，框架用反射自动生成参数说明，不用手写。
+          </p>
+        </article>
+
+        <!-- MCP -->
+        <article class="mo-mod mo-reveal">
+          <div class="mod-tag"><span class="num">模块二</span>外接工具协议</div>
+          <h3>外接工具的两种进货方式<span class="en">MCP</span></h3>
+          <p class="mod-role">MCP 是个开放协议，让 Agent 能调用外部服务提供的工具。框架给了两套接法，对应两种进货思路。</p>
+          <div class="mo-metaphor">
+            <span class="lab">打个比方</span>
+            <strong>方式一</strong>像把整箱工具搬回家摆好，要用直接拿——快、顺手，但占地方。
+            <strong>方式二</strong>像家里只放个目录，要哪个再打电话去仓库问、去取——省地方，但多跑一趟。
+          </div>
+          <div class="mo-compare">
+            <div class="mo-col">
+              <h4>方式一 · 整箱搬回家</h4>
+              <div class="col-sub">直接挂载，启动时连好</div>
+              <dl>
+                <dt>适合什么场景</dt>
+                <dd>工具少、固定、常用的服务</dd>
+                <dt>怎么干</dt>
+                <dd>启动就连好远端服务，把它的每个工具直接当成 Agent 的工具摆好</dd>
+                <dt>好处</dt>
+                <dd>调用最快，能带上远端的安全标记（比如「只读」「有破坏性」）做权限判断</dd>
+                <dt>代价</dt>
+                <dd>工具多的时候，光工具说明就占不少上下文</dd>
+              </dl>
+            </div>
+            <div class="mo-col">
+              <h4>方式二 · 要哪个去取</h4>
+              <div class="col-sub">按需发现，用到了才查</div>
+              <dl>
+                <dt>适合什么场景</dt>
+                <dd>工具很多、大部分用不上、或者经常变的服务</dd>
+                <dt>怎么干</dt>
+                <dd>只给模型四个「中转工具」：先列有哪些服务、再看某服务有什么工具、再查某工具的参数、最后才调用</dd>
+                <dt>好处</dt>
+                <dd>省上下文，适合长尾和动态能力</dd>
+                <dt>代价</dt>
+                <dd>每次都要现查，整体慢一些，也不会带远端的安全标记</dd>
+              </dl>
+            </div>
+          </div>
+          <p style="margin:18px 0 0;font-size:15.5px;color:var(--ink-2);line-height:1.6">
+            两种方式<strong style="color:var(--ink)">可以一起用</strong>：常用的核心工具走方式一直接挂，长尾的走方式二按需取。
+          </p>
+        </article>
+
+        <!-- SKILL -->
+        <article class="mo-mod mo-reveal">
+          <div class="mod-tag"><span class="num">模块三</span>技能仓库</div>
+          <h3>说明书库<span class="en">Skill</span></h3>
+          <p class="mod-role">把复杂任务封装成一本本「说明书」（一个目录带一份 SKILL.md），需要时翻开，不需要时不占地方。</p>
+          <div class="mo-metaphor">
+            <span class="lab">打个比方</span>
+            就像家里有一摞说明书——做菜、修电器、报税。平时收在柜子里<strong>不占台面</strong>，
+            需要哪本就翻哪本。模型先看到的是每本说明书的一行简介，真正要用时才把正文打开。
+          </div>
+          <div class="mo-cares">
+            <div class="ct">三层信息，逐层打开</div>
+            <ul>
+              <li><strong>第一层 · 看到名字</strong>：只把每本说明书的名字和一句话描述塞进提示词，让模型知道「有这些技能可用」</li>
+              <li><strong>第二层 · 翻开正文</strong>：模型觉得要用某技能，调一个工具把 SKILL.md 正文加载进上下文</li>
+              <li><strong>第三层 · 跑脚本</strong>：技能里带的脚本不会塞进提示词，而是在隔离的工作区里执行，只把结果带回来</li>
+            </ul>
+          </div>
+          <ul class="mo-modpoints">
+            <li>技能的加载状态记在会话里，按<strong>哪个 Agent 加载的</strong>分开存，所以多个 Agent 共用一次对话时不会互相串</li>
+            <li>说明书可以从本地目录读，也可以从网上的压缩包下载解压</li>
+            <li>跑脚本需要「代码执行器」配合——把技能目录搬进工作区再执行</li>
+          </ul>
+        </article>
+
+        <!-- SESSION -->
+        <article class="mo-mod mo-reveal">
+          <div class="mod-tag"><span class="num">模块四</span>会话管理</div>
+          <h3>这次对话的草稿本<span class="en">Session</span></h3>
+          <p class="mod-role">记着这一次对话说了什么、中间结果是什么。按「哪个应用、哪个用户、哪次对话」分开存，对话结束就翻篇。</p>
+          <div class="mo-metaphor">
+            <span class="lab">打个比方</span>
+            像开会时手边的<strong>草稿本</strong>——记着这次讨论的来龙去脉。开新会就换新本子。
+            本子里还夹着几张便利贴（状态），比如「技能 A 已经加载了」「上次摘要到哪了」。
+          </div>
+          <div class="mo-cares">
+            <div class="ct">这个模块管这几件事</div>
+            <ul>
+              <li><strong>存取对话</strong>：加载已有对话、追加新消息（<code>GetSession</code> / <code>AppendEvent</code>）</li>
+              <li><strong>自动摘要</strong>：对话太长时，后台用模型压成一段摘要，省 token（<code>EnqueueSummaryJob</code>）</li>
+              <li><strong>状态读写</strong>：存各种小标记，应用级、用户级、本次对话级各管各的</li>
+              <li><strong>钩子</strong>：消息写入前后能插一手，比如自动给消息分类打标签</li>
+            </ul>
+          </div>
+          <ul class="mo-modpoints">
+            <li>支持内存、SQLite、Redis、Postgres、MySQL、ClickHouse 等多种后端，<strong>共享逻辑抽在 <code>internal/</code></strong>，各后端只写存储部分</li>
+            <li>两个可选能力：<strong>按语义搜历史消息</strong>和<strong>按锚点精确取某段消息</strong>——需要后端支持，所以这两个工具是按后端能力动态挂的</li>
+            <li>还有个「投递口」机制（<code>Ingestor</code>），专门把整段对话丢给外部记忆平台</li>
+          </ul>
+        </article>
+
+        <!-- MEMORY -->
+        <article class="mo-mod mo-reveal">
+          <div class="mod-tag"><span class="num">模块五</span>长期记忆</div>
+          <h3>这个人的人物档案<span class="en">Memory</span></h3>
+          <p class="mod-role">按「哪个应用、哪个用户」存的人物档案，跨对话不丢。记的是「他叫张三、喜欢 Go、在腾讯」这种稳定事实。</p>
+          <div class="mo-metaphor">
+            <span class="lab">打个比方</span>
+            会话是<strong>短期记忆</strong>（这次聊了啥），记忆是<strong>长期记忆</strong>（这个人是谁）。
+            换对话不会丢——下次他再来，你还记得他喜欢什么。
+          </div>
+          <div class="mo-compare" style="margin-top:18px">
+            <div class="mo-col">
+              <h4>方式一 · 工具驱动</h4>
+              <div class="col-sub">Agent 自己决定记什么</div>
+              <p style="margin:0;font-size:15px;color:var(--ink-2);line-height:1.55">
+                把「存记忆」「搜记忆」这些工具交给 Agent，它在对话里判断要不要记，用户能看到它调用工具的过程。适合需要精确控制记什么的场景。
+              </p>
+            </div>
+            <div class="mo-col">
+              <h4>方式二 · 自动提取（推荐）</h4>
+              <div class="col-sub">后台默默学，用户无感</div>
+              <p style="margin:0;font-size:15px;color:var(--ink-2);line-height:1.55">
+                配个提取器，每轮对话后后台跑模型分析「这轮有什么值得记的」，自动存下来。用户只看到对话，感知不到后台在学。
+              </p>
+            </div>
+          </div>
+          <ul class="mo-modpoints" style="margin-top:18px">
+            <li>同一条内容重复存不会变多条——按内容算指纹，相同就覆盖更新</li>
+            <li>支持内存、Redis、MySQL、Postgres、pgvector 等后端，<strong>检索算法共享在 <code>internal/</code></strong></li>
+            <li>外部记忆平台（mem0、腾讯的 TencentDB）走<strong>投递口</strong>接入：只把对话丢过去，存取都由外部平台管</li>
+          </ul>
+        </article>
+
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ============ SEQUENCE ============ -->
+  <section class="mo-section" id="sequence">
+    <div class="mo-wrap">
+      <div class="mo-sectionhead mo-reveal">
+        <div class="mo-eyebrow">第二部分 · 调用时序</div>
+        <h2>模型说要调用工具后，发生了什么</h2>
+        <p>从模型说要调用工具，到把结果送回模型，中间要过一道道关。改工具相关代码时最易踩错的就是这个顺序，尤其<strong>权限检查用的是「改完之后」的参数</strong>，不是模型最初给的那版。</p>
+      </div>
+      <div class="mo-seq mo-reveal">
+        <div class="mo-step"><div class="n">01</div><div class="body"><strong>模型说要调用工具</strong><span>框架拿到模型要调的工具列表。</span></div></div>
+        <div class="mo-step"><div class="n">02</div><div class="body"><strong>先把参数修一修（可选）</strong><span>模型给的参数有时不是合法的 JSON，尽力补好，避免后面执行失败。</span></div></div>
+        <div class="mo-step"><div class="n">03</div><div class="body"><strong>给这次调用贴个编号</strong><span>存进上下文，工具实现能拿到这个编号打日志、做埋点。</span></div></div>
+        <div class="mo-step"><div class="n">04</div><div class="body"><strong>跑执行前的钩子</strong><span>可以改参数、甚至直接返回结果不真跑了（<code>callbacks</code> 回调）。</span></div></div>
+        <div class="mo-step"><div class="n">05</div><div class="body"><strong>敲定最终参数</strong><span>权限检查看的是这版参数——经过修复和钩子改写后的，不是模型最初那版。</span></div></div>
+        <div class="mo-step"><div class="n">06</div><div class="body"><strong>查权限</strong><span>工具自己的检查先跑，运行时的策略后跑；不让跑就拦下，返回「被拒绝」或「需要审批」。</span></div></div>
+        <div class="mo-step"><div class="n">07</div><div class="body"><strong>真正执行</strong><span>普通工具失败可按策略重试；流式工具边跑边吐数据。</span></div></div>
+        <div class="mo-step"><div class="n">08</div><div class="body"><strong>跑执行后的钩子</strong><span>可以替换结果，或要求「跳过总结」直接结束这轮。</span></div></div>
+        <div class="mo-step"><div class="n">09</div><div class="body"><strong>把结果转成回模型的消息</strong><span>转成模型能看懂的格式。</span></div></div>
+        <div class="mo-step"><div class="n">10</div><div class="body"><strong>送回模型继续想</strong><span>模型拿到工具结果，继续推理。</span></div></div>
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ============ WIRING (SIGNATURE) ============ -->
+  <section class="mo-section" id="wiring">
+    <div class="mo-wrap">
+      <div class="mo-sectionhead mo-reveal">
+        <div class="mo-eyebrow">第三部分 · 接线图</div>
+        <h2>六个模块怎么互相找</h2>
+        <p>这是全页的核心。模块不是各干各的——搜索工具按后端能力自动决定挂不挂、记忆工具从上下文反找服务、跑脚本要靠代码执行器、MCP 中转站和技能互为信息源、压缩掉的内容能按线索捞回来、外部记忆平台走投递口而不是直接接管。每条线都说清了<strong>谁需要谁、为什么</strong>。</p>
+      </div>
+      <div class="mo-wiregrid mo-reveal">
+
+        <div class="mo-wire">
+          <div class="node left"><span class="nt">会话的两个搜索工具</span><span class="ns">session_search · session_load</span></div>
+          <div class="wire-mid"><div class="wire-line"></div><span class="wire-label">按后端能力自动挂</span></div>
+          <div class="node right"><span class="nt">会话服务</span><span class="ns">要看后端支不支持向量检索</span></div>
+          <div class="why"><span class="id">线 一</span>这两个工具不是写死的——每次调用时，框架会看后端支不支持<strong>语义搜索</strong>和<strong>按锚点取消息</strong>，支持才挂对应的工具。换个不支持的后端，搜索工具自动消失。</div>
+        </div>
+
+        <div class="mo-wire">
+          <div class="node left"><span class="nt">记忆工具</span><span class="ns">存、删、搜记忆</span></div>
+          <div class="wire-mid"><div class="wire-line"></div><span class="wire-label">从上下文反找服务</span></div>
+          <div class="node right"><span class="nt">记忆服务</span><span class="ns">上下文里挂的那份</span></div>
+          <div class="why"><span class="id">线 二</span>工具自己不绑死某个后端，运行时从执行上下文里把记忆服务拿出来用，再从会话里取用户身份。所以换后端不用改工具。</div>
+        </div>
+
+        <div class="mo-wire">
+          <div class="node left"><span class="nt">跑脚本工具</span><span class="ns">skill_run · skill_exec</span></div>
+          <div class="wire-mid"><div class="wire-line"></div><span class="wire-label">搬进工作区再执行</span></div>
+          <div class="node right"><span class="nt">代码执行器</span><span class="ns">提供运行环境</span></div>
+          <div class="why"><span class="id">线 三</span>跑脚本的工具先把技能目录搬进一个隔离的工作区，再让代码执行器在里面跑命令。这俩是<strong>独立的开关</strong>——配了执行器只是让跑脚本能用，不会顺手把别的代码也跑了。</div>
+        </div>
+
+        <div class="mo-wire">
+          <div class="node left"><span class="nt">MCP 中转站</span><span class="ns">需要时去连外部</span></div>
+          <div class="wire-mid"><div class="wire-line"></div><span class="wire-label">技能告诉去哪连</span></div>
+          <div class="node right"><span class="nt">技能仓库</span><span class="ns">提供地址和能力说明</span></div>
+          <div class="why"><span class="id">线 四</span>中转站只管「怎么连、怎么调」，但它不知道「为什么要连这个」。技能正好补这层——技能加载后告诉模型「有这么个外部服务、地址是这个、能干这些」，模型再让中转站去连。</div>
+        </div>
+
+        <div class="mo-wire">
+          <div class="node left"><span class="nt">上下文压缩</span><span class="ns">对话太长时压一压</span></div>
+          <div class="wire-mid"><div class="wire-line"></div><span class="wire-label">留线索，按需捞回</span></div>
+          <div class="node right"><span class="nt">按需取回工具</span><span class="ns">session_load</span></div>
+          <div class="why"><span class="id">线 五</span>压掉的内容不是真删，而是留个线索（事件编号）。模型发现还需要那段内容时，用取回工具按线索捞回来。<strong>压缩是移出活动区，不是有损丢弃。</strong></div>
+        </div>
+
+        <div class="mo-wire">
+          <div class="node left"><span class="nt">外部记忆平台</span><span class="ns">mem0 · TencentDB</span></div>
+          <div class="wire-mid"><div class="wire-line"></div><span class="wire-label">走投递口，不接管</span></div>
+          <div class="node right"><span class="nt">会话投递口</span><span class="ns">Ingestor · 框架只丢不管</span></div>
+          <div class="why"><span class="id">线 六</span>这些外部平台不归框架直接管——框架只在每轮结束后把整段对话丢过去，存取都由平台自己来。<strong>「框架直管记忆」和「丢给外部」是两条不同的路。</strong></div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ============ RUN LIFECYCLE ============ -->
+  <section class="mo-section" id="lifecycle">
+    <div class="mo-wrap">
+      <div class="mo-sectionhead mo-reveal">
+        <div class="mo-eyebrow">第四部分 · 一次调用</div>
+        <h2>一次调用从头到尾怎么走</h2>
+        <p>会话服务在整个过程里被反复用；记忆服务只在收尾用一次；投递口也只在收尾用一次。还有个重点：摘要是在<strong>每条消息写完后顺手触发</strong>的，不是等全部跑完才做。</p>
+      </div>
+      <div class="mo-rungrid">
+
+        <div class="mo-seq mo-reveal">
+          <div class="mo-step"><div class="n">1</div><div class="body"><strong>准备会话</strong><span>有就加载，没有就新建一个。</span></div></div>
+          <div class="mo-step"><div class="n">2</div><div class="body"><strong>登记这次调用</strong><span>绑一个「取消按钮」，方便随时叫停。</span></div></div>
+          <div class="mo-step"><div class="n">3</div><div class="body"><strong>接好事件追加器</strong><span>Agent 每吐一个事件，自动落进会话里。</span></div></div>
+          <div class="mo-step"><div class="n">4</div><div class="body"><strong>开跑 Agent</strong><span>驱动 Agent 干活，消费它产出的事件流。</span></div></div>
+          <div class="mo-step"><div class="n">5</div><div class="body"><strong>边跑边记</strong><span>每条事件存进会话，顺便看看要不要做摘要。</span></div></div>
+          <div class="mo-step"><div class="n">6</div><div class="body"><strong>收尾</strong><span>触发记忆提取、把对话丢给外部记忆平台。</span></div></div>
+        </div>
+
+        <div class="mo-cancel mo-reveal">
+          <h4>怎么随时叫停一次调用</h4>
+          <p>调用方先给这次调用起个名字（请求 ID），框架把这个名字和一个「取消开关」绑在一起存进表里。想叫停时，拿这个名字一查、一按，这次调用就停了。</p>
+          <div class="cancel-fig">
+<span class="cm">// 调用方给这次调用起个名字</span>
+WithRequestID(id) <span class="arr">─►</span> 这次调用的名字
+<span class="cm">// 框架把名字和取消开关绑一起</span>
+registerRun(id, 取消开关) <span class="arr">─►</span> 存进表
+<span class="cm">// 想叫停时</span>
+Cancel(id)            <span class="arr">─►</span> 查表 <span class="arr">─►</span> 按取消开关
+<span class="cm">// 跑完或叫停后</span>
+注销(id)               <span class="arr">─►</span> 从表里删掉，防泄漏</div>
+          <p>要叫停一次调用，<strong style="color:var(--signal)">应该去按这个取消开关</strong>，而不是在读取结果时直接跳出循环——因为 Agent 可能还在后台往通道里写，你跳出了它写不出去，就会卡住、漏内存。</p>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
+
+  <!-- ============ DESIGN NOTES ============ -->
+  <section class="mo-section" id="notes">
+    <div class="mo-wrap">
+      <div class="mo-sectionhead mo-reveal">
+        <div class="mo-eyebrow">第五部分 · 有意为之</div>
+        <h2>几个故意这么设计的地方</h2>
+        <p>改这些模块时，下面这些是「故意这么设计的」，别无意中改坏了。</p>
+      </div>
+      <div class="mo-notes-grid mo-reveal">
+        <div class="mo-note">
+          <h4>搜索工具是动态挂的，不是写死的</h4>
+          <p>每次调用时，框架会看会话后端支不支持向量检索，支持才挂搜索工具。换个不支持的后端，搜索工具自动消失。改这块要保留这个「按能力动态挂」的机制。</p>
+        </div>
+        <div class="mo-note">
+          <h4>共享逻辑别在每个后端重复写</h4>
+          <p>会话和记忆都把共享逻辑（摘要编排、检索算法、分页排序）抽在 <code>internal/</code> 里，各后端只写存储。改检索或摘要逻辑优先改 <code>internal/</code>，别去每个后端改一遍。</p>
+        </div>
+        <div class="mo-note">
+          <h4>叫停要走取消开关，读到通道关闭</h4>
+          <p>按取消开关后，Agent 会停下来、事件流会关闭，读取结果的一方要把通道读到关闭为止。这是事件流框架的通用约定。</p>
+        </div>
+        <div class="mo-note">
+          <h4>「框架直管」和「丢给外部」是两条路</h4>
+          <p>记忆服务（<code>MemoryService</code>）是框架直接管记忆的 CRUD 和自动提取；投递口（<code>Ingestor</code>）是框架只把对话丢给外部平台、不管存取。新增外部记忆平台，优先走投递口这条路。</p>
+        </div>
+        <div class="mo-note">
+          <h4>技能的加载状态按 Agent 分开存</h4>
+          <p>「技能 A 已经加载了」这种状态，是按哪个 Agent 加载的分开存的，所以多个 Agent 共用一次对话时不会互相串。改技能相关逻辑要保留这套隔离。</p>
+        </div>
+        <div class="mo-note">
+          <h4>权限检查看的是改完之后的参数</h4>
+          <p>权限检查用的参数，是经过「JSON 修复 + 执行前钩子改写」之后的最终版，不是模型最初给的那版。改权限逻辑要基于这个前提。</p>
+        </div>
+        <div class="mo-note">
+          <h4>后台任务的错误不容易看见</h4>
+          <p>记忆自动提取、复盘这类活儿在后台跑，报错了只落一条警告日志。要想「后台连续失败」能被发现，得加计数器或回调上报，光看日志发现不了。</p>
+        </div>
+      </div>
+    </div>
+  </section>
+
+</main>
+
+<footer class="mo-foot">
+  <div class="mo-wrap">
+    <div>
+      模块怎么搭 · trpc-agent-go<br>
+      核实于 2026-07-07 · 分支 <span style="color:var(--ink-2)">feat/lightai</span><br>
+      源笔记：<a href="module-organization.md">module-organization.md</a>
+    </div>
+    <div style="text-align:right">
+      行号基于当前工作树源码<br>
+      后续若重构需复核<br>
+      <span style="color:var(--signal)">●</span> 连接 · <span style="color:var(--blue)">●</span> 结构 · <span style="color:var(--go)">●</span> 类型
+    </div>
+  </div>
+</footer>
+
+<script>
+  (function(){
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if(reduce){
+      document.querySelectorAll('.mo-reveal').forEach(function(el){ el.classList.add('is-visible'); });
+      document.querySelectorAll('.mo-wire').forEach(function(el){ el.classList.add('in'); });
+      return;
+    }
+    if(!('IntersectionObserver' in window)){
+      document.querySelectorAll('.mo-reveal').forEach(function(el){ el.classList.add('is-visible'); });
+      document.querySelectorAll('.mo-wire').forEach(function(el){ el.classList.add('in'); });
+      return;
+    }
+    var io = new IntersectionObserver(function(entries){
+      entries.forEach(function(e){
+        if(e.isIntersecting){
+          e.target.classList.add('is-visible');
+          io.unobserve(e.target);
+        }
+      });
+    }, { threshold: 0.12, rootMargin: '0px 0px -8% 0px' });
+    document.querySelectorAll('.mo-reveal').forEach(function(el){ io.observe(el); });
+    var wio = new IntersectionObserver(function(entries){
+      entries.forEach(function(e, i){
+        if(e.isIntersecting){
+          setTimeout(function(){ e.target.classList.add('in'); }, i*80);
+          wio.unobserve(e.target);
+        }
+      });
+    }, { threshold: 0.3 });
+    document.querySelectorAll('.mo-wire').forEach(function(el){ wio.observe(el); });
+  })();
+</script>
+
+</body>
+</html>
