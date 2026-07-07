@@ -215,6 +215,7 @@ type sessionSummarizer struct {
 	systemPrompt        string
 	cacheSafeForking    bool
 	cacheSafeForkPrompt string
+	useDetailedPrompt   bool
 	checks              []ContextChecker
 	maxSummaryWords     int
 	skipRecentFunc      SkipRecentFunc
@@ -247,12 +248,23 @@ func NewSummarizer(m model.Model, opts ...Option) SessionSummarizer {
 		opt(s)
 	}
 
-	// Set default prompt if none was provided
+	// Set default prompt if none was provided. When WithDetailedContinuityPrompt
+	// is set, prefer the detailed continuity variants (resolved with the final
+	// maxSummaryWords so option order does not matter); an explicit WithPrompt /
+	// WithCacheSafeForkPrompt always takes precedence.
 	if s.prompt == "" {
-		s.prompt = getDefaultSummarizerPrompt(s.maxSummaryWords)
+		if s.useDetailedPrompt {
+			s.prompt = detailedContinuityPrompt(s.maxSummaryWords)
+		} else {
+			s.prompt = getDefaultSummarizerPrompt(s.maxSummaryWords)
+		}
 	}
 	if s.cacheSafeForkPrompt == "" {
-		s.cacheSafeForkPrompt = getDefaultCacheSafeForkPrompt(s.maxSummaryWords)
+		if s.useDetailedPrompt {
+			s.cacheSafeForkPrompt = detailedContinuityCacheSafeForkPrompt(s.maxSummaryWords)
+		} else {
+			s.cacheSafeForkPrompt = getDefaultCacheSafeForkPrompt(s.maxSummaryWords)
+		}
 	}
 	if err := validatePrompt(s.prompt); err != nil {
 		log.Warnf("invalid prompt in NewSummarizer: %v", err)

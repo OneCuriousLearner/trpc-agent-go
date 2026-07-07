@@ -38,11 +38,33 @@ type SkipRecentFunc func(events []event.Event) int
 // replaced with the extracted conversation when generating the summary. When
 // WithMaxSummaryWords is configured, {max_summary_words} must be included in
 // either this prompt or WithSystemPrompt.
+//
+// When set, this takes precedence over WithDetailedContinuityPrompt for the
+// standard (non-fork) path.
 func WithPrompt(prompt string) Option {
 	return func(s *sessionSummarizer) {
 		if prompt != "" {
 			s.prompt = prompt
 		}
+	}
+}
+
+// WithDetailedContinuityPrompt enables a nine-section structured summary
+// prompt that preserves verbatim user messages, key facts, and the most
+// recent conversation, materially improving long-conversation recall compared
+// to the simple default prompt. It overrides both the standard and the
+// cache-safe fork prompts (unless an explicit WithPrompt /
+// WithCacheSafeForkPrompt is also set, which takes precedence).
+//
+// The prompt is resolved at NewSummarizer time using the final
+// WithMaxSummaryWords value, so callers may set these options in any order.
+//
+// Best for long conversations; for short ones the extra prompt cost may
+// outweigh the benefit (per benchmark data). The default behavior (the
+// simple prompt) is unchanged unless this option is set.
+func WithDetailedContinuityPrompt() Option {
+	return func(s *sessionSummarizer) {
+		s.useDetailedPrompt = true
 	}
 }
 
