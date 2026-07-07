@@ -63,6 +63,20 @@ const (
 	defaultContextCompactionThresholdRatio = 0.7
 	contextCompactionFallbackWindow        = 8192
 	contextCompactionMinTokens             = 2000
+
+	// Circuit breaker: stop attempting pre-LLM context compaction after this
+	// many consecutive failures within a single run. Without this, when the
+	// context is irrecoverably over the limit (e.g. the summarizer model is
+	// down or the gateway keeps erroring), each turn retries the doomed
+	// summary generation. Aligned with Claude Code's
+	// MAX_CONSECUTIVE_AUTOCOMPACT_FAILURES (BQ: 1279 sessions had 50+
+	// consecutive failures, wasting ~250K API calls/day).
+	maxContextCompactionConsecutiveFailures = 3
+
+	// contextCompactionFailureCountStateKey stores the consecutive-compaction-
+	// failure count on the invocation state (per-run, not persisted across
+	// runs). See maxContextCompactionConsecutiveFailures.
+	contextCompactionFailureCountStateKey = "__context_compaction_failure_count__"
 )
 
 // InvocationHasFilteredUserTools reports whether the cached filtered tool
@@ -1511,7 +1525,32 @@ func (f *Flow) maybeCompactContextBeforeLLM(
 	if !decision.shouldCompact {
 		return req
 	}
-	return f.runContextCompaction(
+
+	// Circuit breaker: if compaction has failed consecutively too many times
+	// in this run, stop retrying -- the context is likely irrecoverably over
+	// the limit (e.g. summarizer model down) and retrying each turn just burns
+	// doomed summary calls. See maxContextCompactionConsecutiveFailures.
+	if failures := contextCompactionFailureCount(invocation); failures >= maxContextCompactionConsecutiveFailures {
+		log.WarnfContext(
+			ctx,
+			"Pre-LLM context compaction skipped for agent %s: circuit breaker "+
+				"tripped after %d consecutive failures this run",
+			invocation.AgentName,
+			failures,
+		)
+		if started {
+			span.SetAttributes(
+				attribute.Bool("llmflow.context_compaction.circuit_open", true),
+				attribute.Int(
+					"llmflow.context_compaction.consecutive_failures",
+					failures,
+				),
+			)
+		}
+		return req
+	}
+
+	rebuilt, outcome := f.runContextCompaction(
 		ctx,
 		invocation,
 		eventChan,
@@ -1519,7 +1558,58 @@ func (f *Flow) maybeCompactContextBeforeLLM(
 		rebuildPlan,
 		decision,
 	)
+	switch outcome {
+	case compactionOutcomeFailed:
+		setContextCompactionFailureCount(
+			invocation,
+			contextCompactionFailureCount(invocation)+1,
+		)
+	case compactionOutcomeSucceeded:
+		setContextCompactionFailureCount(invocation, 0)
+		// compactionOutcomeSkipped: leave the counter unchanged.
+	}
+	return rebuilt
 }
+
+// contextCompactionFailureCount reads the consecutive-compaction-failure
+// counter from the invocation state. Returns 0 when unset. Per-run only.
+func contextCompactionFailureCount(invocation *agent.Invocation) int {
+	if invocation == nil {
+		return 0
+	}
+	if v, ok := invocation.GetState(contextCompactionFailureCountStateKey); ok {
+		if n, ok := v.(int); ok {
+			return n
+		}
+	}
+	return 0
+}
+
+// setContextCompactionFailureCount writes the counter back to the invocation
+// state. A count of 0 effectively clears it.
+func setContextCompactionFailureCount(invocation *agent.Invocation, n int) {
+	if invocation == nil {
+		return
+	}
+	invocation.SetState(contextCompactionFailureCountStateKey, n)
+}
+
+// compactionOutcome reports the result of a single pre-LLM context compaction
+// attempt, used by the circuit breaker in maybeCompactContextBeforeLLM to
+// decide whether to keep retrying.
+type compactionOutcome int
+
+const (
+	// compactionOutcomeSkipped means no new summary was generated and nothing
+	// failed (e.g. no new events to summarize). Does NOT count as a failure.
+	compactionOutcomeSkipped compactionOutcome = iota
+	// compactionOutcomeFailed means summary generation itself errored. Counts
+	// toward the circuit breaker.
+	compactionOutcomeFailed
+	// compactionOutcomeSucceeded means a new summary was generated and the
+	// request rebuilt. Resets the failure counter.
+	compactionOutcomeSucceeded
+)
 
 func (f *Flow) runContextCompaction(
 	ctx context.Context,
@@ -1528,7 +1618,7 @@ func (f *Flow) runContextCompaction(
 	req *model.Request,
 	rebuildPlan *contextCompactionRebuildPlan,
 	decision contextCompactionDecision,
-) *model.Request {
+) (*model.Request, compactionOutcome) {
 	filterKey := invocation.GetEventFilterKey()
 	before := snapshotSummary(invocation.Session, filterKey)
 	emitLatencyDiagnosticEvent(
@@ -1595,8 +1685,9 @@ func (f *Flow) runContextCompaction(
 				invocation.AgentName,
 				err,
 			)
+			return req, compactionOutcomeFailed
 		}
-		return req
+		return req, compactionOutcomeSkipped
 	}
 
 	rebuildCtx, rebuildSpan, rebuildStarted := startLatencySpan(
@@ -1619,7 +1710,7 @@ func (f *Flow) runContextCompaction(
 			"Pre-LLM context compaction skipped for agent %s: safe rebuild unavailable",
 			invocation.AgentName,
 		)
-		return req
+		return req, compactionOutcomeSkipped
 	}
 
 	if err != nil {
@@ -1629,7 +1720,7 @@ func (f *Flow) runContextCompaction(
 			invocation.AgentName,
 			err,
 		)
-		return rebuilt
+		return rebuilt, compactionOutcomeSucceeded
 	}
 
 	log.DebugfContext(
@@ -1637,7 +1728,7 @@ func (f *Flow) runContextCompaction(
 		"Pre-LLM context compaction rebuilt request for agent %s",
 		invocation.AgentName,
 	)
-	return rebuilt
+	return rebuilt, compactionOutcomeSucceeded
 }
 
 func (f *Flow) rebuildRequestForContextCompaction(

@@ -1490,3 +1490,194 @@ func TestCloneRequestForContextCompaction_DeepCopiesMutableFields(t *testing.T) 
 	require.True(t, ok)
 	require.Nil(t, cloneJSONMapForContextCompaction(nil))
 }
+
+// switchableSummaryService lets a test flip CreateSessionSummary between
+// failing and succeeding between compaction attempts, to exercise the
+// circuit breaker (count, reset, skip-not-counted).
+type switchableSummaryService struct {
+	session.Service
+	mu       sync.Mutex
+	calls    int
+	failNext bool
+	err      error
+}
+
+func (s *switchableSummaryService) CreateSessionSummary(
+	ctx context.Context,
+	sess *session.Session,
+	filterKey string,
+	force bool,
+) error {
+	s.mu.Lock()
+	s.calls++
+	fail := s.failNext
+	err := s.err
+	s.mu.Unlock()
+	if fail {
+		return err
+	}
+	// On the success path, inject a fresh summary so before.advanced(after)
+	// returns true (outcome=Succeeded). The inmemory base service alone has no
+	// summarizer configured, so it would not advance the summary.
+	sess.SummariesMu.Lock()
+	defer sess.SummariesMu.Unlock()
+	if sess.Summaries == nil {
+		sess.Summaries = make(map[string]*session.Summary)
+	}
+	sess.Summaries[filterKey] = &session.Summary{
+		Summary:   "compressed history",
+		UpdatedAt: time.Now().Add(time.Minute),
+	}
+	return nil
+}
+
+func (s *switchableSummaryService) Calls() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.calls
+}
+
+func (s *switchableSummaryService) setFailNext(fail bool, err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.failNext = fail
+	s.err = err
+}
+
+// newCircuitBreakerFixture builds a flow + invocation whose request is over
+// the compaction threshold, wired to a switchable summary service. Returns
+// the pieces a test needs to drive maybeCompactContextBeforeLLM repeatedly.
+func newCircuitBreakerFixture(t *testing.T) (
+	f *Flow,
+	inv *agent.Invocation,
+	req *model.Request,
+	svc *switchableSummaryService,
+	rebuildPlan *contextCompactionRebuildPlan,
+) {
+	t.Helper()
+	modelName := "compact-circuit-breaker"
+	model.RegisterModelContextWindow(modelName, 10000)
+
+	baseSvc := inmemory.NewSessionService()
+	t.Cleanup(func() { require.NoError(t, baseSvc.Close()) })
+
+	svc = &switchableSummaryService{
+		Service: baseSvc,
+		err:     errors.New("forced summary error"),
+	}
+
+	longContent := strings.Repeat("history ", 2000)
+	sess := &session.Session{
+		Events: []event.Event{
+			{
+				RequestID: "req-old",
+				Timestamp: time.Now().Add(-time.Hour),
+				Response: &model.Response{
+					Done: true,
+					Choices: []model.Choice{{
+						Message: model.NewUserMessage(longContent),
+					}},
+				},
+			},
+		},
+	}
+
+	inv = agent.NewInvocation(
+		agent.WithInvocationSession(sess),
+		agent.WithInvocationSessionService(svc),
+		agent.WithInvocationMessage(model.NewUserMessage("current")),
+		agent.WithInvocationRunOptions(agent.RunOptions{RequestID: "req-current"}),
+		agent.WithInvocationModel(&compactingModel{name: modelName}),
+		agent.WithInvocationEventFilterKey("branch/cb"),
+	)
+
+	f = New(
+		[]flow.RequestProcessor{
+			processor.NewContentRequestProcessor(
+				processor.WithAddSessionSummary(true),
+			),
+		},
+		nil,
+		Options{
+			EnableContextCompaction:         true,
+			ContextCompactionThresholdRatio: 0.2,
+		},
+	)
+
+	req = &model.Request{}
+	rebuildPlan = f.preprocess(context.Background(), inv, req, nil)
+	return f, inv, req, svc, rebuildPlan
+}
+
+// TestContextCompaction_CircuitBreakerTripsAfterConsecutiveFailures verifies
+// that after maxContextCompactionConsecutiveFailures (3) failed compaction
+// attempts, further attempts are skipped without calling CreateSessionSummary.
+func TestContextCompaction_CircuitBreakerTripsAfterConsecutiveFailures(t *testing.T) {
+	f, inv, req, svc, plan := newCircuitBreakerFixture(t)
+	svc.setFailNext(true, errors.New("forced summary error"))
+
+	// Drive compaction a few times; each below the threshold still attempts.
+	for i := 1; i <= maxContextCompactionConsecutiveFailures; i++ {
+		f.maybeCompactContextBeforeLLM(context.Background(), inv, nil, req, plan)
+	}
+	require.Equal(t, maxContextCompactionConsecutiveFailures, svc.Calls(),
+		"each of the first %d attempts should have called CreateSessionSummary",
+		maxContextCompactionConsecutiveFailures)
+	require.Equal(t, maxContextCompactionConsecutiveFailures,
+		contextCompactionFailureCount(inv))
+
+	// The next attempt should be skipped by the circuit breaker — no new
+	// CreateSessionSummary call.
+	f.maybeCompactContextBeforeLLM(context.Background(), inv, nil, req, plan)
+	require.Equal(t, maxContextCompactionConsecutiveFailures, svc.Calls(),
+		"circuit breaker should skip the call after tripping")
+}
+
+// TestContextCompaction_FailureCountResetsOnSuccess verifies that a
+// successful compaction clears the failure counter, so a later failure
+// streak starts fresh.
+func TestContextCompaction_FailureCountResetsOnSuccess(t *testing.T) {
+	f, inv, req, svc, plan := newCircuitBreakerFixture(t)
+
+	// Two failures (below the trip threshold).
+	svc.setFailNext(true, errors.New("forced summary error"))
+	f.maybeCompactContextBeforeLLM(context.Background(), inv, nil, req, plan)
+	f.maybeCompactContextBeforeLLM(context.Background(), inv, nil, req, plan)
+	require.Equal(t, 2, contextCompactionFailureCount(inv))
+
+	// Now succeed — counter must reset.
+	svc.setFailNext(false, nil)
+	f.maybeCompactContextBeforeLLM(context.Background(), inv, nil, req, plan)
+	require.Equal(t, 0, contextCompactionFailureCount(inv),
+		"a successful compaction must reset the failure counter")
+
+	// Two more failures should NOT trip yet (streak restarted from 0).
+	svc.setFailNext(true, errors.New("forced summary error"))
+	f.maybeCompactContextBeforeLLM(context.Background(), inv, nil, req, plan)
+	f.maybeCompactContextBeforeLLM(context.Background(), inv, nil, req, plan)
+	require.Equal(t, 2, contextCompactionFailureCount(inv))
+}
+
+// TestContextCompaction_SkippedDoesNotCountAsFailure verifies that when the
+// compaction path is skipped before reaching CreateSessionSummary (no
+// over-threshold request), the failure counter is left untouched.
+func TestContextCompaction_SkippedDoesNotCountAsFailure(t *testing.T) {
+	f, inv, req, svc, plan := newCircuitBreakerFixture(t)
+
+	// Seed a non-zero failure counter directly.
+	setContextCompactionFailureCount(inv, 2)
+	beforeCalls := svc.Calls()
+
+	// Shrink the request below the threshold so shouldCompact=false; the
+	// compaction path is skipped before CreateSessionSummary is ever called.
+	req.Messages = nil
+	svc.setFailNext(false, nil)
+	f.maybeCompactContextBeforeLLM(context.Background(), inv, nil, req, plan)
+
+	// No CreateSessionSummary call (compaction never triggered), and the
+	// failure counter must be unchanged.
+	require.Equal(t, beforeCalls, svc.Calls(),
+		"a below-threshold request should not call CreateSessionSummary")
+	require.Equal(t, 2, contextCompactionFailureCount(inv),
+		"a skipped compaction must not touch the failure counter")
+}
