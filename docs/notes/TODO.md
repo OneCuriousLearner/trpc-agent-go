@@ -13,7 +13,7 @@
 | T2 | CodeBuddy Provider 可信度评估 / 备选后端 | 中 | `[?]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b;(2026-07-07 额度一度耗尽 `14019`,已换 key 恢复;推荐高性价比模型见 CLAUDE.md) |
 | T3 | 跨多次 LLM 调用的 token usage 累加 helper | 中 | `[ ]` | — |
 | T4 | 流式 usage 累加对非标准网关不鲁棒(可修复 bug) | 高 | `[x]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2 |
-| T5 | benchmark 默认钉本地版本(go.work 方案) | 中 | `[~]` | go.work 设计+验证✅;待用户 fork+推 go.work(Claude 无法代办 fork) |
+| T5 | benchmark 默认钉本地版本(go.work 方案) | 中 | `[~]` | go.work 已推 fork(OneCuriousLearner/trpc-agent-go-benchmark,分支 feat/local-workspace)+ setup 脚本✅;待全流程验证 |
 | T6 | 框架多处直接构造 `model.Request` 不设 Stream(已逐条复核:非静默失效,会显式报错;修法应在 provider 层兜底) | 中 | `[~]` | 见 T2 决策 |
 | T7 | llmflow 主循环:空 completion 被判非 final → 死循环(真 bug,已修复);benchmark hang 实测证伪 | 高 | `[x]` | 由 T6 定位挖出 |
 | T8 | summary_ondemand 实跑取经 + 详细 prompt 已落地验证(`WithDetailedContinuityPrompt`,commit b1497d09) | 中 | `[~]` | 关联 T1;详 pgmt 验证见 T8 正文 |
@@ -32,7 +32,7 @@
 - **T1 可恢复压缩闭环** → **已端到端验证闭合**(见 T1"已坐实的基础")。压缩占位符带 event_id、`session_load` 能靠它取回原始内容,两端接缝对齐。
 - **T1 摘要 prompt 升级(详细连续性)** → **已落地为 `WithDetailedContinuityPrompt`**(commit b1497d09)+ **实测验证**。设计被验证正确(claude-sonnet-4.6 下详细摘要字符数达基线 74960 量级);但澄清了适用边界——"详细必然提升 ROUGE-L"不成立,只对弱模型/默认摘要弱/on-demand 检索场景有效,强模型+纯摘要直接回答反而被冗长拖累(见 T8 验证结论)。
 - **CodeBuddy 网关 `ck_` key 额度**(2026-07-07):实测验证 benchmark 时一度耗尽(`code 14019`,claude 与 glm 均不可用);**已换 key 恢复**,glm-5.2/minimax-m3/kimi-k2.7/deepseek-v4-pro 实测均通。换 key 有个坑:当前 shell 的 `CODEBUDDY_API_KEY` 若残留旧 key,cb-chat/provider 不会重读 `~/.codebuddy.env`(见 CLAUDE.md "换 key 后的坑")。后续跑 benchmark **只用高性价比模型**(glm-5.2 等,见 CLAUDE.md),避免 claude 系虚高且易耗尽额度。
-- **T5 benchmark 默认钉本地**(2026-07-07):go.work 方案设计 + 本地验证通过(go.work 放 benchmark 目录,主仓库不受影响、三块 benchmark 全解析本地;放主仓库根因 Go"use+replace 冲突"不可行)。**待用户 fork benchmark + 推 go.work**(Claude 无法代办 fork),协作者用脚本拉 fork。详见 T5 正文。
+- **T5 benchmark 默认钉本地**(2026-07-07):go.work 已推到用户 fork(`OneCuriousLearner/trpc-agent-go-benchmark`,分支 `feat/local-workspace`),commit 含 go.work + .gitignore(go.work.sum)。主仓库 `scripts/setup-benchmark-fork.sh` 帮协作者把 benchmark submodule 切到 fork 分支。本地验证:三块 benchmark build 全绿、`go list -m` 确认全解析本地。待全流程验证(全新 clone + 跑脚本)。详见 T5 正文。
 
 **下一步聚焦**:T1 核心收口(2026-07-07)——prompt 升级 + 熔断器已完成并验证,可恢复裁剪经查证不做(归口 flow 层 compaction),多档阈值作为可选后续(对框架价值有限,无 UI 反馈需求)。下一步:用 glm-5.2 小样本验证熔断器真实网关行为,之后转下一个 T(积累改动后再跑 benchmark)。
 
@@ -237,27 +237,19 @@ replace (
 ```
 注意:`../` 假定 benchmark 检出在 `trpc-agent-go/benchmark/`(git submodule 标准布局)。`evaluation`、`storage/mysql` 是 2026-07-07 补全的(summary 依赖 evaluation、memory 依赖 storage/mysql,不 replace 会走外部旧版误测)。
 
-### 落地步骤(需用户操作,因 fork 无法由 Claude 完成)
+### 落地步骤(2026-07-07 已执行 1-2,3 已实现为脚本)
 
-1. **用户 fork** `github.com/trpc-group/trpc-agent-go-benchmark` 到自己账号(对官方仓库无 write 权限,fork 是必须的)。
-2. **在 fork 提交 go.work**:把上面定稿内容写到 `benchmark/go.work`(fork 仓库根),提交到一个分支(如 `feat/local-workspace`),推到 fork。
-3. **协作者拉 fork**:写一个 `scripts/setup-benchmark-fork.sh`(放主仓库),帮协作者把 fork clone 到 `trpc-agent-go/benchmark/` 标准位置:
-   ```bash
-   # scripts/setup-benchmark-fork.sh(待用户填 fork url 占位符)
-   BENCHMARK_FORK_URL="<用户填:你的 fork git url>"
-   git -C benchmark remote set-url origin "$BENCHMARK_FORK_URL"
-   git -C benchmark fetch origin feat/local-workspace
-   git -C benchmark checkout feat/local-workspace
-   ```
-   协作者首次 clone 主仓库后跑这个脚本,benchmark 就指向 fork、含 go.work。
-4. **更新 T5 文档**(本步):记录方案 + go.work 定稿 + 落地步骤,标记状态。
-5. **fork 维护**:用户 fork 上会"加更多定制"(用户决定),需定期 rebase 官方 main 拉新 benchmark。
+1. **用户 fork** `github.com/trpc-group/trpc-agent-go-benchmark` → `github.com/OneCuriousLearner/trpc-agent-go-benchmark`。✅
+2. **在 fork 提交 go.work**:已推到分支 `feat/local-workspace`(commit 含 `go.work` + `.gitignore` 忽略 `go.work.sum`)。✅
+3. **协作者拉 fork**:`scripts/setup-benchmark-fork.sh`(主仓库)把 benchmark submodule 切到 fork 分支。✅ 已实现,默认 `FORK_URL=https://github.com/OneCuriousLearner/trpc-agent-go-benchmark.git`、`FORK_BRANCH=feat/local-workspace`,可用 `BENCHMARK_FORK_URL`/`BENCHMARK_FORK_BRANCH` 环境变量覆盖。协作者首次 clone 主仓库后跑 `./scripts/setup-benchmark-fork.sh` 即可。
+4. **fork 维护**:用户 fork 上会"加更多定制"(用户决定),需定期 rebase 官方 main 拉新 benchmark。
 
 ### 状态
 
 - [x] go.work 内容设计 + 本地验证通过(2026-07-07,三块 benchmark build 全绿、`go list -m` 确认全解析本地)。
-- [ ] **待用户 fork + 推 go.work**(Claude 无法代办 fork)。
-- [ ] 待写 `scripts/setup-benchmark-fork.sh`(依赖 fork url,用户 fork 完后填占位符)。
+- [x] 用户 fork + 推 go.work(fork: `OneCuriousLearner/trpc-agent-go-benchmark`,分支 `feat/local-workspace`)。
+- [x] `scripts/setup-benchmark-fork.sh` 实现(fork url 已填,非占位符)。
+- [ ] **待全流程验证**:全新 clone 主仓库 + 跑脚本 + 确认版本正确(派 agent 在 `/tmp/test/` 验证)。
 - [ ] CI 是否跑本地 benchmark:另一维度,本方案只解决本地默认钉本地。
 
 ### 操作备忘(历史:临时改 go.mod,已被 go.work 方案取代)
