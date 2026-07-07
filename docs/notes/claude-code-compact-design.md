@@ -163,7 +163,7 @@ trpc-agent-go **已有**一套相当成熟的分级体系(见 [TODO.md T1](TODO.
 | PTL 重试 | 无 | ❌ gap(优先级低) |
 | post-compact 附件恢复 | `session_load` 工具(按需,模型主动调) | ⚠️ 有按需恢复,**无自动重注入** |
 | 可恢复(tool result) | 占位符带 event_id → session_load | ✅ 已坐实闭环(T1 已验证) |
-| 可恢复(消息轮次) | tailoring 硬删 | ❌ **gap:不可恢复** |
+| 可恢复(消息轮次) | tailoring 硬删 | ⚠️ gap,但**model 层不可行**(`Message` 无 event_id 字段、ctx 无 session);归口 flow 层 compaction(已有闭环) |
 
 ---
 
@@ -181,10 +181,11 @@ trpc-agent-go **已有**一套相当成熟的分级体系(见 [TODO.md T1](TODO.
 - 改动小:`maybeCompactContextBeforeLLM` 路径加连续失败计数,超限跳过。
 - 有 BQ 数据支撑价值(250K API 调用/天)。
 
-### 高价值、高改动:可恢复裁剪(对应 §4 "可恢复消息轮次" gap)
-- tailoring 硬删 → 改成可恢复(留占位符指向 session)。
-- 最契合 T1 "可恢复压缩" 主题,但要改 `model/token_tailor.go` 核心策略,需评估对 MiddleOut/HeadOut/TailOut 的影响和回归。
-- 改动面大,建议作为 T1 的后续阶段。
+### ~~高价值、高改动:可恢复裁剪~~(2026-07-07 查证:不推荐做)
+- 原计划:tailoring 硬删 → 改成可恢复(留占位符指向 session)。
+- **查证后:model 层精准可恢复不可行**。`Message` 结构(`model/request.go`)无 event_id 字段、`TailorMessages(ctx, messages, maxTokens)` 的 ctx 无 session 注入(model/session 分层硬约束)。占位符只能退化为 `Content` 文本提示(不带 event_id、非精准),还占预算可能恶化删除。
+- **可恢复闭环已存在、且在正确的层**:flow 层 compaction(`recoverableToolResultPlaceholder` + `session_load` 按 event_id 取回)已验证闭合。tailoring 硬删的是"中间整轮历史",真有关键信息本该走 compaction summary / session_search 兜底。
+- **职责边界**:可恢复归 flow/event 层(compaction + session_load),硬预算保命归 model 层(tailoring)。维持硬删现状。
 
 ### 中价值、中改动:多档阈值(对应 §3.1)
 - 单档 0.7 → 补 warning/error/blocking。

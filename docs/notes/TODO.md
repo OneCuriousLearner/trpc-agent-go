@@ -33,7 +33,7 @@
 - **T1 摘要 prompt 升级(详细连续性)** → **已落地为 `WithDetailedContinuityPrompt`**(commit b1497d09)+ **实测验证**。设计被验证正确(claude-sonnet-4.6 下详细摘要字符数达基线 74960 量级);但澄清了适用边界——"详细必然提升 ROUGE-L"不成立,只对弱模型/默认摘要弱/on-demand 检索场景有效,强模型+纯摘要直接回答反而被冗长拖累(见 T8 验证结论)。
 - **CodeBuddy 网关 `ck_` key 额度**(2026-07-07):实测验证 benchmark 时一度耗尽(`code 14019`,claude 与 glm 均不可用);**已换 key 恢复**,glm-5.2/minimax-m3/kimi-k2.7/deepseek-v4-pro 实测均通。换 key 有个坑:当前 shell 的 `CODEBUDDY_API_KEY` 若残留旧 key,cb-chat/provider 不会重读 `~/.codebuddy.env`(见 CLAUDE.md "换 key 后的坑")。后续跑 benchmark **只用高性价比模型**(glm-5.2 等,见 CLAUDE.md),避免 claude 系虚高且易耗尽额度。
 
-**下一步聚焦**:T1 剩余 gap 里挑一个推进——"压缩熔断器"(纯框架代码 + mock 测试,无需 LLM 调用,跟 [T7](#t7--llmflow-主循环空-completion-被判非-final--死循环真-bug已修复-) 同属健壮性)或"可恢复裁剪"(`token_tailor` 硬删→可恢复,改动面较大)。额度已恢复,需要时可继续 benchmark 类验证,但优先选不依赖网关的方向。
+**下一步聚焦**:T1 剩余 gap 里,"压缩熔断器"和"摘要 prompt 升级"均已完成(见 T8 验证结论),"可恢复裁剪"经查证不推荐做(model 层精准可恢复不可行)。当前剩余可做项主要是"多档阈值"(单档 0.7→补 warning/error/blocking)。额度已恢复(高性价比模型见 CLAUDE.md),需要时可继续 benchmark 类验证。
 
 ---
 
@@ -414,10 +414,10 @@ model was called 19094 times in 300ms
 
 ### T1 待办的 gap 优先级(源自精华文档 §5,按"价值×可行性"排序)
 
-- [ ] **高价值/中改动:摘要 prompt 升级**。报告实证是最大质量杠杆(九段式让纯 summary ROUGE-L 0.0473→0.2965)。给 `session/summary` 加 detailed prompt option,默认行为不变,风险低。
-- [ ] **高价值/低改动:压缩熔断器**。跟 [T7](#t7--llmflow-主循环空-completion-被判非-final--死循环真-bug已修复-) 同属健壮性;`maybeCompactContextBeforeLLM` 路径加连续失败计数,超限跳过。有 BQ 数据(250K API 调用/天)。
-- [ ] **高价值/高改动:可恢复裁剪**。`token_tailor` 硬删 → 可恢复(留占位符指向 session)。最契合 T1 主题,但要改 MiddleOut 等核心策略,需评估回归。建议作 T1 后续阶段。
-- [ ] **中价值/中改动:多档阈值**。单档 0.7 → 补 warning/error/blocking,提升可观测性。
+- [x] **高价值/中改动:摘要 prompt 升级**(2026-07-07 完成,commit b1497d09)。`WithDetailedContinuityPrompt` 已落地 + 实测验证(见 T8 验证结论)。
+- [x] **高价值/低改动:压缩熔断器**(2026-07-07 完成,commit `3c64c6a9`)。`maybeCompactContextBeforeLLM` 加连续失败计数(阈值 3,对齐 Claude Code),`runContextCompaction` 返回 outcome(success/skipped/failed)驱动计数(success 清零、failed +1、skipped 不动)。跟 [T7](#t7--llmflow-主循环空-completion-被判非-final--死循环真-bug已修复-) 同属健壮性。
+- [x] **~~高价值/高改动:可恢复裁剪~~(2026-07-07 查证:不推荐做)**。原计划让 `token_tailor` 硬删 → 可恢复。经精读代码 + Plan agent 独立验证,**model 层精准可恢复不可行**:`Message` 结构无 event_id 字段(`model/request.go`)、ctx 无 session 注入,占位符只能退化为 `Content` 文本提示(不带 event_id、非精准),还占预算可能恶化删除。可恢复闭环已存在且在正确的层——flow 层 compaction(`recoverableToolResultPlaceholder` + `session_load` 按 event_id 取回,T1 已验证闭合)。**职责边界:可恢复归 flow/event 层,硬预算保命归 model 层(tailoring)**。维持硬删现状。详细权衡见 plan `/root/.tclaude/plans/groovy-watching-clover.md`。
+- [ ] **中价值/中改动:多档阈值**。单档 0.7 → 补 warning/error/blocking,提升可观测性。当前 T1 剩余主要可做项。
 - [ ] 低优先:PTL 重试(框架不直接发 Anthropic API,难统一介入)、post-compact 自动附件重注入(已有 session_load 按需,自动重注入偏 CLI 特性)、缓存感知分流(依赖 Anthropic cache_edits,多 provider 难通用化)。
 
 ### 关键文件
