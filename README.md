@@ -796,6 +796,36 @@ go vet ./...
 
 **Please read** [CONTRIBUTING.md](CONTRIBUTING.md) for detailed guidelines and coding standards.
 
+### Running Benchmarks Against the Local Framework (Optional)
+
+The `benchmark/` submodule pins `trpc-agent-go` to a published snapshot, so
+running benchmarks directly would build against an external version rather
+than your local changes. A `go.work`-based scheme lets benchmarks resolve
+`trpc-agent-go` to the sibling checkout by default — no per-run `go.mod`
+surgery, no forgetting to revert.
+
+A one-time setup script switches the submodule to a fork branch that carries
+the `go.work`:
+
+```bash
+# 1. Clone the main repo (with the benchmark submodule).
+git clone --recurse-submodules https://github.com/<your-fork>/trpc-agent-go.git
+cd trpc-agent-go
+
+# 2. Switch benchmark to the local-pinning fork branch.
+./scripts/setup-benchmark-fork.sh
+
+# 3. Verify benchmarks now build against the local tree.
+cd benchmark/memory/trpc-agent-go-impl && go list -m trpc.group/trpc-go/trpc-agent-go
+#   ^ should print "... => ../", i.e. the local working tree
+```
+
+`setup-benchmark-fork.sh` is idempotent and points at
+`OneCuriousLearner/trpc-agent-go-benchmark:feat/local-workspace` by default;
+override with `BENCHMARK_FORK_URL` / `BENCHMARK_FORK_BRANCH` if you maintain
+your own fork. The main repo still tracks the official submodule pointer —
+only people who run the script opt into the local-pinning fork.
+
 ## Acknowledgements
 
 ### **Enterprise Validation**

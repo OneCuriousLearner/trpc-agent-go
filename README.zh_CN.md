@@ -744,6 +744,30 @@ go vet ./...
 
 **请阅读** [CONTRIBUTING.md](CONTRIBUTING.md) 了解详细指南和编码标准。
 
+### 用本地框架代码跑 Benchmark(可选)
+
+`benchmark/` 子模块把 `trpc-agent-go` 钉在了已发布的快照上,直接跑 benchmark 构建的是外部版本,不是你的本地改动。一套基于 `go.work` 的方案能让 benchmark 默认把 `trpc-agent-go` 解析到旁边的本地检出——无需每次改 `go.mod`、也无需记得还原。
+
+一个一次性的初始化脚本把子模块切到携带 `go.work` 的 fork 分支:
+
+```bash
+# 1. 克隆主仓库(含 benchmark 子模块)。
+git clone --recurse-submodules https://github.com/<your-fork>/trpc-agent-go.git
+cd trpc-agent-go
+
+# 2. 把 benchmark 切到钉本地的 fork 分支。
+./scripts/setup-benchmark-fork.sh
+
+# 3. 验证 benchmark 现在构建的是本地代码。
+cd benchmark/memory/trpc-agent-go-impl && go list -m trpc.group/trpc-go/trpc-agent-go
+#   ^ 应打印 "... => ../",即指向本地工作树
+```
+
+`setup-benchmark-fork.sh` 幂等可用,默认指向
+`OneCuriousLearner/trpc-agent-go-benchmark:feat/local-workspace`;若你维护自己的
+fork,可用 `BENCHMARK_FORK_URL` / `BENCHMARK_FORK_BRANCH` 环境变量覆盖。主仓库仍
+跟踪官方子模块指针——只有跑了这个脚本的人才会切到钉本地的 fork,不影响其他人。
+
 ## 致谢
 
 ### **企业验证**
