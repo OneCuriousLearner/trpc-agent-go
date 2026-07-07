@@ -392,12 +392,21 @@ model was called 19094 times in 300ms
 
 ### 待办
 
-- [ ] 精读 `benchmark/summary/results/REPORT{,.zh_CN}.md` 全文,把 detailed-prompt / visible-events / max-tool-iterations 等参数对质量-成本的影响提炼成 T1 的默认配置建议。
+- [x] **精读 Claude Code compact 全部源码并提炼精华文档**(2026-07-06 完成):见 [claude-code-compact-design.md](claude-code-compact-design.md)。5 层分级流水线逐层拆解 + 横切设计(四级阈值/熔断器/两段式 prompt/缓存感知分流/PTL 重试/post-compact 附件恢复) + **对照 trpc-agent-go 现状标注 gap** + 给 T1 的启示。
+- [x] 精读 `benchmark/summary/results/REPORT{,.zh_CN}.md` 全文(已在精华文档 §4 对照表 + T8 上文"已有报告的关键数据"提炼)。
 - [?] (可选)本地实跑 `summary_ondemand` 复现报告:需 pgvector(`-pgvector-dsn`)+ 数据集下载;注意 benchmark go.mod 钉外部版问题(见 [T5](#t5--benchmark-子模块-gomod-钉死外部旧版验证本地改动会误测过时代码-),要先切本地工作树才能测本地改动)。报告已有数据,本地实跑主要用于验证 T1 改动后的效果,非取经必需。
-- [ ] 把提炼结论并入 T1 阶段 2 的设计。
+
+### T1 待办的 gap 优先级(源自精华文档 §5,按"价值×可行性"排序)
+
+- [ ] **高价值/中改动:摘要 prompt 升级**。报告实证是最大质量杠杆(九段式让纯 summary ROUGE-L 0.0473→0.2965)。给 `session/summary` 加 detailed prompt option,默认行为不变,风险低。
+- [ ] **高价值/低改动:压缩熔断器**。跟 [T7](#t7--llmflow-主循环空-completion-被判非-final--死循环真-bug已修复-) 同属健壮性;`maybeCompactContextBeforeLLM` 路径加连续失败计数,超限跳过。有 BQ 数据(250K API 调用/天)。
+- [ ] **高价值/高改动:可恢复裁剪**。`token_tailor` 硬删 → 可恢复(留占位符指向 session)。最契合 T1 主题,但要改 MiddleOut 等核心策略,需评估回归。建议作 T1 后续阶段。
+- [ ] **中价值/中改动:多档阈值**。单档 0.7 → 补 warning/error/blocking,提升可观测性。
+- [ ] 低优先:PTL 重试(框架不直接发 Anthropic API,难统一介入)、post-compact 自动附件重注入(已有 session_load 按需,自动重注入偏 CLI 特性)、缓存感知分流(依赖 Anthropic cache_edits,多 provider 难通用化)。
 
 ### 关键文件
 
+- [claude-code-compact-design.md](claude-code-compact-design.md)(⭐ Claude Code compact 设计精华 + 对照 trpc-agent-go gap + T1 启示)
 - `benchmark/summary/results/REPORT.zh_CN.md`(现成跑分报告 + 结论)
 - `benchmark/summary/trpc-agent-go-impl/qmsum.go` / `longmemeval.go`(summary_ondemand 场景实现,`WithAddSessionSummary(true)` + `WithEnableOnDemandSession(true)` 的标准用法)
 - `internal/session/tool/recall/`(`session_search` / `session_load` 工具实现)
