@@ -1,0 +1,486 @@
+<!DOCTYPE html>
+<!--
+  工程笔记可视化导航页 · trpc-agent-go
+  位置: docs/notes/index.html
+  启动/关闭服务、新增报告入口的指引都在页面底部「OPS」「DEV」可折叠区块（默认收起）。
+  新增报告入口：在底部 REPORTS 数组里加一项即可。
+-->
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>工程笔记 · 可视化 · trpc-agent-go</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg:#F4F5F7;
+    --surface:#FFFFFF;
+    --ink:#14181F;
+    --ink-2:#5B6270;
+    --ink-3:#8A90A0;
+    --rule:#D9DCE2;
+    --rule-2:#E7E9EE;
+    --blue:#0B3D6E;
+    --blue-2:#1B6FB8;
+    --signal:#E8743B;
+    --signal-2:#F2A07A;
+    --signal-bg:rgba(232,116,59,0.06);
+    --go:#00ADD8;
+    --maxw:1120px;
+  }
+
+  *{box-sizing:border-box}
+  html{scroll-behavior:smooth}
+  body{
+    margin:0;
+    background:var(--bg);
+    color:var(--ink);
+    font-family:'IBM Plex Sans',system-ui,-apple-system,sans-serif;
+    font-size:17px;
+    line-height:1.65;
+    -webkit-font-smoothing:antialiased;
+    text-rendering:optimizeLegibility;
+  }
+  body::before{
+    content:"";
+    position:fixed; inset:0;
+    background-image:
+      linear-gradient(rgba(11,61,110,0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgba(11,61,110,0.035) 1px, transparent 1px);
+    background-size:32px 32px;
+    pointer-events:none; z-index:0;
+  }
+  .idx-wrap{position:relative; z-index:1; max-width:var(--maxw); margin:0 auto; padding:0 28px}
+
+  /* ---- title-bar hero (工程图纸标题栏) ---- */
+  .idx-titlebar{
+    margin-top:48px;
+    border:1px solid var(--rule);
+    border-radius:10px;
+    background:var(--surface);
+    overflow:hidden;
+    position:relative;
+  }
+  .idx-titlebar::before, .idx-titlebar::after,
+  .idx-titlebar .cross-tl, .idx-titlebar .cross-br{
+    content:""; position:absolute; width:10px; height:10px;
+    background:
+      linear-gradient(var(--ink-3),var(--ink-3)) center/10px 1px no-repeat,
+      linear-gradient(var(--ink-3),var(--ink-3)) center/1px 10px no-repeat;
+  }
+  .idx-titlebar::before{top:10px; left:10px}
+  .idx-titlebar::after{top:10px; right:10px}
+  .idx-titlebar .cross-tl{bottom:10px; left:10px}
+  .idx-titlebar .cross-br{bottom:10px; right:10px}
+
+  .idx-tb-head{
+    display:flex; align-items:baseline; gap:16px;
+    padding:22px 32px 0; flex-wrap:wrap;
+  }
+  .idx-tb-head .stamp{
+    font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:600;
+    letter-spacing:0.14em; text-transform:uppercase; color:var(--signal);
+    display:inline-flex; align-items:center; gap:8px;
+  }
+  .idx-tb-head .stamp::before{content:""; width:24px; height:1px; background:var(--signal)}
+  .idx-tb-head .fig-no{
+    margin-left:auto;
+    font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--ink-3);
+    letter-spacing:0.06em;
+  }
+  .idx-tb-body{padding:18px 32px 30px}
+  .idx-tb-body h1{
+    font-family:'Space Grotesk',sans-serif; font-weight:600;
+    font-size:clamp(36px, 6vw, 60px); line-height:1.05;
+    letter-spacing:-0.025em; margin:0 0 18px; color:var(--ink);
+  }
+  .idx-tb-body h1 .accent{color:var(--signal); font-style:italic; font-weight:500}
+  .idx-tb-body .lede{
+    max-width:680px; font-size:18px; line-height:1.6; color:var(--ink-2); margin:0;
+  }
+  .idx-tb-body .lede strong{color:var(--ink); font-weight:600}
+  .idx-tb-foot{
+    border-top:1px dashed var(--rule);
+    padding:14px 32px;
+    display:flex; gap:32px; flex-wrap:wrap;
+    font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--ink-3);
+  }
+  .idx-tb-foot .cell .k{color:var(--ink-3); margin-right:6px}
+  .idx-tb-foot .cell .v{color:var(--blue); font-weight:500}
+
+  /* ---- section head ---- */
+  .idx-section{padding:64px 0 32px}
+  .idx-sectionhead{margin-bottom:36px; display:flex; align-items:baseline; gap:16px; flex-wrap:wrap}
+  .idx-sectionhead h2{
+    font-family:'Space Grotesk',sans-serif; font-weight:600;
+    font-size:clamp(24px,3.5vw,32px); line-height:1.15;
+    letter-spacing:-0.02em; margin:0; color:var(--ink);
+  }
+  .idx-sectionhead .ct{
+    font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--signal);
+    font-weight:500; letter-spacing:0.04em;
+    background:var(--signal-bg); padding:3px 10px; border-radius:4px;
+  }
+  .idx-sectionhead .hint{
+    margin-left:auto; font-size:14px; color:var(--ink-3);
+  }
+
+  /* ---- report cards ---- */
+  .idx-grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(340px, 1fr)); gap:24px}
+  .idx-card{
+    position:relative; display:flex; flex-direction:column;
+    background:var(--surface); border:1px solid var(--rule); border-radius:10px;
+    padding:0; text-decoration:none; color:inherit;
+    transition:transform .2s ease, box-shadow .2s ease, border-color .2s ease;
+    overflow:hidden;
+  }
+  .idx-card:hover{
+    transform:translateY(-3px);
+    box-shadow:0 16px 36px -18px rgba(11,61,110,0.22);
+    border-color:var(--signal-2);
+  }
+  .idx-card-head{
+    display:flex; align-items:center; gap:12px;
+    padding:18px 22px 14px;
+    border-bottom:1px dashed var(--rule);
+  }
+  .idx-card-head .figno{
+    font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:600;
+    color:var(--signal); letter-spacing:0.08em;
+    background:var(--signal-bg); padding:3px 8px; border-radius:3px;
+    transition:background .2s, color .2s;
+  }
+  .idx-card:hover .idx-card-head .figno{background:var(--signal); color:#fff}
+  .idx-card-head .kind{
+    font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--ink-3);
+    letter-spacing:0.06em; text-transform:uppercase;
+  }
+  .idx-card-head .date{margin-left:auto; font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--ink-3)}
+  .idx-card-body{padding:18px 22px 20px; flex:1; display:flex; flex-direction:column}
+  .idx-card-body h3{
+    font-family:'Space Grotesk',sans-serif; font-weight:600;
+    font-size:21px; line-height:1.2; letter-spacing:-0.015em;
+    margin:0 0 8px; color:var(--ink);
+  }
+  .idx-card-body .sub{
+    font-family:'JetBrains Mono',monospace; font-size:12.5px;
+    color:var(--blue); margin:0 0 12px; font-weight:500;
+  }
+  .idx-card-body .blurb{
+    font-size:15px; color:var(--ink-2); line-height:1.6; margin:0 0 18px; flex:1;
+  }
+  .idx-tags{display:flex; flex-wrap:wrap; gap:6px; margin-bottom:16px}
+  .idx-tags .t{
+    font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--ink-2);
+    background:#FAFBFC; border:1px solid var(--rule-2);
+    padding:2px 8px; border-radius:3px;
+  }
+  .idx-card-foot{
+    display:flex; align-items:center; justify-content:space-between;
+    padding-top:14px; border-top:1px dashed var(--rule);
+  }
+  .idx-card-foot .open{
+    font-family:'JetBrains Mono',monospace; font-size:12px; font-weight:600;
+    color:var(--blue); display:flex; align-items:center; gap:6px;
+    transition:color .2s, gap .2s;
+  }
+  .idx-card:hover .idx-card-foot .open{color:var(--signal); gap:10px}
+  .idx-card-foot .open .arr{transition:transform .2s}
+  .idx-card:hover .idx-card-foot .open .arr{transform:translateX(2px)}
+  .idx-card-foot .pages{font-family:'JetBrains Mono',monospace; font-size:11px; color:var(--ink-3)}
+
+  /* ---- add-entry note ---- */
+  .idx-addnote{
+    margin-top:40px; background:var(--surface); border:1px solid var(--rule);
+    border-left:4px solid var(--blue); border-radius:0 10px 10px 0; padding:24px 28px;
+  }
+  .idx-addnote h3{
+    font-family:'Space Grotesk',sans-serif; font-weight:600; font-size:18px;
+    margin:0 0 6px; color:var(--ink);
+  }
+  .idx-addnote .asub{font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--blue); margin-bottom:16px}
+  .idx-addnote p{margin:0 0 12px; font-size:15px; color:var(--ink-2); line-height:1.6}
+  .idx-addnote p strong{color:var(--ink)}
+  .idx-addnote code{
+    font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--blue);
+    background:rgba(11,61,110,0.06); padding:1px 5px; border-radius:3px;
+  }
+  .idx-codeblock{
+    background:#FAFBFC; border:1px solid var(--rule-2); border-radius:6px;
+    padding:14px 16px; font-family:'JetBrains Mono',monospace; font-size:12.5px;
+    line-height:1.7; color:var(--ink); overflow-x:auto; white-space:pre; margin-top:8px;
+  }
+  .idx-codeblock .cm{color:var(--ink-3)}
+  .idx-codeblock .k{color:var(--blue); font-weight:500}
+  .idx-codeblock .s{color:var(--signal)}
+
+  /* ---- 运维说明（可折叠）---- */
+  .idx-ops{
+    margin-top:40px; background:var(--surface); border:1px solid var(--rule);
+    border-radius:10px; overflow:hidden;
+  }
+  .idx-ops summary{
+    list-style:none; cursor:pointer;
+    display:flex; align-items:center; gap:12px;
+    padding:18px 24px;
+    font-family:'Space Grotesk',sans-serif; font-weight:600; font-size:18px; color:var(--ink);
+    user-select:none;
+  }
+  .idx-ops summary::-webkit-details-marker{display:none}
+  .idx-ops summary .ops-tag{
+    font-family:'JetBrains Mono',monospace; font-size:11px; font-weight:600;
+    color:var(--blue); letter-spacing:0.1em; text-transform:uppercase;
+    background:rgba(11,61,110,0.08); padding:3px 8px; border-radius:3px;
+  }
+  .idx-ops summary .ops-chev{
+    margin-left:auto; color:var(--ink-3); font-family:'JetBrains Mono',monospace; font-size:14px;
+    transition:transform .2s;
+  }
+  .idx-ops[open] summary .ops-chev{transform:rotate(90deg)}
+  .idx-ops summary:hover{background:#FAFBFC}
+  .idx-ops-body{padding:0 24px 24px; border-top:1px dashed var(--rule)}
+  .idx-ops-body h4{
+    font-family:'Space Grotesk',sans-serif; font-weight:600; font-size:16px;
+    margin:20px 0 6px; color:var(--ink);
+  }
+  .idx-ops-body .op-sub{font-family:'JetBrains Mono',monospace; font-size:12px; color:var(--signal); margin-bottom:14px}
+  .idx-ops-body p{margin:0 0 12px; font-size:15px; color:var(--ink-2); line-height:1.6}
+  .idx-ops-body p strong{color:var(--ink)}
+  .idx-ops-body code{font-family:'JetBrains Mono',monospace; font-size:13px; color:var(--blue); background:rgba(11,61,110,0.06); padding:1px 5px; border-radius:3px}
+
+  /* ---- footer ---- */
+  .idx-foot{
+    padding:48px 0 64px; font-family:'JetBrains Mono',monospace;
+    font-size:12px; color:var(--ink-3); line-height:1.7;
+  }
+  .idx-foot a{color:var(--blue); text-decoration:none; border-bottom:1px solid var(--rule)}
+  .idx-foot a:hover{color:var(--signal); border-color:var(--signal-2)}
+  .idx-foot .idx-wrap{display:flex; justify-content:space-between; flex-wrap:wrap; gap:16px}
+
+  .idx-reveal{opacity:0; transform:translateY(16px); transition:opacity .6s ease, transform .6s ease}
+  .idx-reveal.is-visible{opacity:1; transform:none}
+  @media (prefers-reduced-motion: reduce){
+    html{scroll-behavior:auto}
+    .idx-reveal{opacity:1; transform:none; transition:none}
+    .idx-card{transition:none}
+    .idx-card:hover{transform:none}
+  }
+  @media (max-width:760px){
+    .idx-wrap{padding:0 18px}
+    .idx-titlebar{margin-top:32px}
+    .idx-tb-head, .idx-tb-body, .idx-tb-foot{padding-left:22px; padding-right:22px}
+    .idx-grid{grid-template-columns:1fr}
+  }
+</style>
+</head>
+<body>
+
+<div class="idx-wrap">
+
+  <!-- TITLE-BAR HERO -->
+  <div class="idx-titlebar idx-reveal">
+    <span class="cross-tl"></span><span class="cross-br"></span>
+    <div class="idx-tb-head">
+      <span class="stamp">工程笔记 · 可视化</span>
+      <span class="fig-no">索引 / INDEX</span>
+    </div>
+    <div class="idx-tb-body">
+      <h1>把框架探索的结论，<br>做成能<span class="accent">看的图</span>。</h1>
+      <p class="lede">
+        这里收的是 trpc-agent-go 探索过程中沉淀的可视化报告——每份都从源码或实测出发，
+        把一个主题的<strong>关键概念</strong>画成图。点进任意一张卡片，就进入对应主题。
+        每有新的探索沉淀，这里就多一个入口。
+      </p>
+    </div>
+    <div class="idx-tb-foot">
+      <span class="cell"><span class="k">仓库</span><span class="v">trpc-agent-go</span></span>
+      <span class="cell"><span class="k">分支</span><span class="v">feat/lightai</span></span>
+      <span class="cell"><span class="k">源笔记目录</span><span class="v">docs/notes/</span></span>
+    </div>
+  </div>
+
+  <!-- REPORT GRID -->
+  <section class="idx-section">
+    <div class="idx-sectionhead idx-reveal">
+      <h2>报告</h2>
+      <span class="ct" id="report-count">— 份</span>
+      <span class="hint">点击卡片进入 →</span>
+    </div>
+    <div class="idx-grid" id="report-grid">
+      <!-- 卡片由 JS 从 REPORTS 数组渲染；JS 禁用时显示兜底 -->
+      <noscript>
+        <p style="grid-column:1/-1; padding:24px; background:#FAFBFC; border:1px solid var(--rule-2); border-radius:8px; color:var(--ink-2); font-size:15px;">
+          报告入口卡片需要 JavaScript 渲染。请启用 JS，或直接打开目录下的报告文件：
+          <a href="module-organization.html" style="color:var(--blue)">module-organization.html</a>、
+          <a href="context-management.html" style="color:var(--blue)">context-management.html</a>。
+        </p>
+      </noscript>
+    </div>
+  </section>
+
+  <!-- 运维说明：怎么启动/关闭 HTML 服务 -->
+  <details class="idx-ops idx-reveal">
+    <summary>
+      <span class="ops-tag">OPS</span>
+      <span>怎么启动 / 关闭 HTML 服务</span>
+      <span class="ops-chev">▶</span>
+    </summary>
+    <div class="idx-ops-body">
+      <h4>启动（让他人能访问）</h4>
+      <div class="op-sub">关键：--bind 0.0.0.0，否则默认只本机能访问</div>
+      <div class="idx-codeblock"><span class="cm"># 方式一：Python 自带（机器上一般有 python3）</span>
+cd /data/workspace/trpc-agent-go/docs/notes
+python3 -m http.server <span class="k">8000</span> --bind <span class="k">0.0.0.0</span>
+
+<span class="cm"># 方式二：Node 的 serve（更稳，带目录索引、缓存友好）</span>
+cd /data/workspace/trpc-agent-go/docs/notes
+npx serve@latest -l <span class="k">8000</span>   <span class="cm"># serve 默认监听所有网卡</span></div>
+      <p>
+        启动后，把 <code>http://&lt;本机IP&gt;:8000/</code> 告诉同事。查本机 IP：
+        <code>hostname -I | awk '{print $1}'</code>（当前机器是 <code>21.6.70.193</code>，但 IP 可能变，以实时查为准）。
+        若机器有防火墙 / 云安全组，需放行对应端口。<strong>仅内网分享用</strong>，不要把无鉴权的静态服务长期暴露公网。
+      </p>
+
+      <h4>关闭</h4>
+      <div class="op-sub">前台跑就 Ctrl+C；后台跑用下面方法</div>
+      <div class="idx-codeblock"><span class="cm"># 方法 A：按端口直接杀（最省事）</span>
+pkill -f <span class="s">"http.server 8000"</span>      <span class="cm"># python 方式</span>
+pkill -f <span class="s">"serve -l 8000"</span>         <span class="cm"># node 方式</span>
+
+<span class="cm"># 方法 B：先看 PID 再精确杀（更稳）</span>
+pgrep -af <span class="s">"http.server 8000"</span>
+<span class="cm"># 输出形如: 1234567 python3 -m http.server 8000 --bind 0.0.0.0</span>
+kill &lt;上面那个 PID&gt;
+
+<span class="cm"># 验证已关闭（连不上 = 已关闭）</span>
+curl -s -o /dev/null -w <span class="s">"%{http_code}\n"</span> --max-time 2 http://0.0.0.0:8000/ || echo <span class="s">"已关闭"</span></div>
+    </div>
+  </details>
+
+  <!-- 怎么新增一个入口 -->
+  <details class="idx-ops idx-reveal" style="margin-top:24px">
+    <summary>
+      <span class="ops-tag">DEV</span>
+      <span>怎么新增一个入口</span>
+      <span class="ops-chev">▶</span>
+    </summary>
+    <div class="idx-ops-body">
+      <h3 style="margin-top:20px">怎么新增一个入口</h3>
+      <div class="op-sub">给后续维护者</div>
+      <p>
+        每份报告就是一个独立的 <code>.html</code> 文件，放在 <code>docs/notes/</code> 下。
+        导航页的入口卡片由本页底部的 <code>REPORTS</code> 数组渲染——<strong>新增报告只需在数组里加一项</strong>，
+        不用改 HTML 结构。加完刷新本页，新卡片就出现了。
+      </p>
+      <div class="idx-codeblock"><span class="cm">// 在本文件底部找到 REPORTS 数组，加一项：</span>
+{
+  <span class="k">id</span>: <span class="s">'your-report'</span>,            <span class="cm">// 唯一标识，也作卡片锚点</span>
+  <span class="k">figNo</span>: <span class="s">'FIG. 03'</span>,             <span class="cm">// 图框编号，顺延即可</span>
+  <span class="k">kind</span>: <span class="s">'主题分类'</span>,             <span class="cm">// 卡片头部的分类标签</span>
+  <span class="k">title</span>: <span class="s">'报告标题'</span>,             <span class="cm">// 卡片主标题</span>
+  <span class="k">sub</span>: <span class="s">'英文/技术副标题'</span>,       <span class="cm">// 蓝色小字副标题</span>
+  <span class="k">blurb</span>: <span class="s">'一两句话讲这份报告讲什么'</span>,
+  <span class="k">tags</span>: [<span class="s">'标签1'</span>, <span class="s">'标签2'</span>],        <span class="cm">// 关键词标签</span>
+  <span class="k">file</span>: <span class="s">'your-report.html'</span>,      <span class="cm">// 同目录下的报告文件名</span>
+  <span class="k">date</span>: <span class="s">'2026-07-08'</span>,            <span class="cm">// 核实日期</span>
+}</div>
+      <p style="margin-top:14px; margin-bottom:0">
+        建议同步把源笔记（<code>.md</code>）写进 <code>docs/notes/README.md</code> 索引，保持 Markdown 与可视化两套入口都不缺。
+      </p>
+    </div>
+  </details>
+
+</div>
+
+<footer class="idx-foot">
+  <div class="idx-wrap">
+    <div>
+      工程笔记 · 可视化导航<br>
+      trpc-agent-go · docs/notes/<br>
+      源 Markdown 索引：<a href="README.md">README.md</a>
+    </div>
+    <div style="text-align:right">
+      卡片由 REPORTS 数组渲染<br>
+      新增报告只改数组，不改结构<br>
+      <span style="color:var(--signal)">●</span> 连接 / <span style="color:var(--blue)">●</span> 结构 / <span style="color:var(--go)">●</span> 类型
+    </div>
+  </div>
+</footer>
+
+<script>
+  // ============================================================
+  //  报告清单 —— 新增入口只改这个数组
+  //  字段说明见上方"怎么新增一个入口"。加完刷新即出现新卡片。
+  // ============================================================
+  const REPORTS = [
+    {
+      id: 'module-organization',
+      figNo: 'FIG. 01',
+      kind: '源码地图',
+      title: '五个模块怎么搭到一起',
+      sub: 'Tools / MCP / Skill / Session / Memory',
+      blurb: '从源码层面厘清五个模块的目录分工、核心接口、横切控制时序，以及它们之间怎么接线。改代码前定位"在哪改、怎么连"用。',
+      tags: ['模块组织', '横切时序', '组合链'],
+      file: 'module-organization.html',
+      date: '2026-07-07',
+    },
+    {
+      id: 'context-management',
+      figNo: 'FIG. 02',
+      kind: '实测验证',
+      title: '一次调用里有什么、怎么裁、怎么看',
+      sub: 'Context Management',
+      blurb: '一次 LLM 调用的上下文怎么组装、接近极限时三层怎么裁、压缩占位符怎么可恢复、怎么把上下文结构导出给前端。带真实网关实测 dump。',
+      tags: ['上下文管理', '压缩闭环', '可视化方案'],
+      file: 'context-management.html',
+      date: '2026-07-08',
+    },
+  ];
+
+  // ---- 渲染 ----
+  (function(){
+    const grid = document.getElementById('report-grid');
+    const countEl = document.getElementById('report-count');
+    if (countEl) countEl.textContent = REPORTS.length + ' 份';
+
+    grid.innerHTML = REPORTS.map(r => `
+      <a class="idx-card idx-reveal" href="${r.file}" id="${r.id}">
+        <div class="idx-card-head">
+          <span class="figno">${r.figNo}</span>
+          <span class="kind">${r.kind}</span>
+          <span class="date">${r.date}</span>
+        </div>
+        <div class="idx-card-body">
+          <h3>${r.title}</h3>
+          <p class="sub">${r.sub}</p>
+          <p class="blurb">${r.blurb}</p>
+          <div class="idx-tags">
+            ${r.tags.map(t => `<span class="t">${t}</span>`).join('')}
+          </div>
+          <div class="idx-card-foot">
+            <span class="open">打开报告 <span class="arr">→</span></span>
+            <span class="pages">${r.file}</span>
+          </div>
+        </div>
+      </a>
+    `).join('');
+
+    // reveal observer
+    const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    if (reduce || !('IntersectionObserver' in window)) {
+      document.querySelectorAll('.idx-reveal').forEach(el => el.classList.add('is-visible'));
+      return;
+    }
+    const io = new IntersectionObserver(entries => {
+      entries.forEach(e => {
+        if (e.isIntersecting) { e.target.classList.add('is-visible'); io.unobserve(e.target); }
+      });
+    }, { threshold: 0.1, rootMargin: '0px 0px -6% 0px' });
+    document.querySelectorAll('.idx-reveal').forEach(el => io.observe(el));
+  })();
+</script>
+
+</body>
+</html>

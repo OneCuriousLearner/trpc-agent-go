@@ -14,6 +14,7 @@
 | [codebuddy-gateway.md](codebuddy-gateway.md) | CodeBuddy 内网模型网关接入实战:真实端点 / 必需请求头 / 抓包方法 / 错误码对照 / §4b token usage 不可信 / §4c 网关无 embedding + Ollama 无 key 方案 / `model/codebuddy` provider 用法。 |
 | [shell-snapshot-guard.md](shell-snapshot-guard.md) | gvm cd 钩子与 tclaude bash 快照守卫:`_encode/_decode: command not found` 刷屏的根因(grep `^_[^_]` 误丢 gvm 函数)、`CLAUDECODE` 守卫方案(`unset -f cd`)、生效条件与验证。CLAUDE.md 仅留浓缩版指向本文。 |
 | [module-organization.md](module-organization.md) | ⭐ Tools/MCP/Skill/Session/Memory 五模块组织方式地图:目录分工 + 核心接口签名 + 横切控制时序(filter→permission→retry→callbacks)+ MCP 两范式对比 + skill 三层信息模型 + session 后端复用 + memory 两模式 + Runner 总装注入与生命周期调用顺序 + 六条模块间组合链。带 file:line,改代码前定位用。 |
+| [context-management.md](context-management.md) | ⭐ 上下文管理:一次 LLM 调用里有什么(RequestProcessor 链 + 实测 dump 对照)+ 接近极限怎么裁(Pass 0/1/2 → 同步摘要兜底 → model 层 MiddleOut 三层时序)+ 怎么把上下文结构导出给前端(BeforeModel 回调是真源、OTel、TokenCounter、agui gap 与方案)+ 实测验证(CodeBuddy 网关真实连通 + mock model 完整 tool 循环 + 压缩占位符带 event_id 可恢复)。带 file:line。 |
 
 ## 约定
 
