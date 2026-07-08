@@ -193,19 +193,6 @@ CB_MODEL=claude-haiku-4.5 cb-chat "hi"
 
 ## gvm cd 钩子与 Claude Code/tclaude shell 快照守卫
 
-`~/.bashrc` 末尾有一段 `CLAUDECODE` 守卫(仅对 `CLAUDECODE=1` 的 shell 生效):
+tclaude bash 快照会误丢 gvm 的 `_encode`/`_decode` 却保留调用它们的 `cd` 钩子,导致带 `cd` 的命令刷屏 `_encode/_decode: command not found`。`~/.bashrc` 末尾的 `CLAUDECODE` 守卫(`unset -f cd`)在快照 shell 里卸掉 cd 钩子、从根上消除触发点。**已验证生效(2026-07-08)**:`type cd` 是 builtin,带 `cd` 命令不再报错,无需再 `grep -vE "_encode|_decode"` 过滤。注意:旧会话(`/resume`)续用旧快照则守卫不生效,需开新会话或 `/branch` 刷新快照。
 
-```bash
-if [[ -n "$CLAUDECODE" ]]; then
-	unset -f cd 2>/dev/null
-fi
-```
-
-**背景**:Claude Code/tclaude 生成 bash 快照时用 `grep -vE '^_[^_]'` 过滤函数,会误丢 gvm 的 `_encode`/`_decode`(单下划线前缀被当成补全函数),却保留调用它们的 gvm `cd` 钩子。于是每条 `cd ...` 命令都触发 `cd` 钩子 → `_encode/_decode: command not found`。守卫在快照 shell 里卸掉 `cd` 钩子、恢复 builtin `cd`,从根上消除触发点。
-
-**生效条件**:tclaude 每个会话只创建一次快照并复用,改完 `.bashrc` 后**必须重启会话**才会用上新快照。验证方式:执行带 `cd` 的命令(如 `cd ... && wc -l *.ts`)不再出现 `_encode/_decode` 报错即生效;`/root/.tclaude/shell-snapshots/` 里新快照不含 `cd` 函数(函数数比旧快照少 1)。
-
-**影响范围(已确认)**:
-- 交互终端是 zsh(走 `~/.zshrc`,无此守卫),gvm 按目录自动切 Go 版本在真实终端照常工作,不受影响。
-- Claude Code 的 bash 快照里 gvm 的 PATH/Go 仍在,只是没了 `cd` 钩子;手动 `gvm use` 仍可用,`go` 命令不受影响。
-- `_encode`/`_decode` 在快照里仍被过滤丢弃(无法本地根治),但因无人调用,不再报错。彻底根治需 Anthropic 上游把 `ShellSnapshot.ts` 的 `^_[^_]` 启发式换成按 `complete -F` 注册表过滤,本地无解。
+详细根因/方案/影响范围见 [docs/notes/shell-snapshot-guard.md](docs/notes/shell-snapshot-guard.md)。
