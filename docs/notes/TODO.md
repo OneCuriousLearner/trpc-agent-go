@@ -11,7 +11,7 @@
 |----|------|--------|------|------|
 | T1 | 上下文压缩(Compact)升级:对标 Claude Code 分级流水线 | 高 | `[~]` | 核心 gap 已完成(prompt 升级✅ b1497d09 / 熔断器✅ 3c64c6a9 / 可恢复裁剪查证不做);多档阈值可选后续 |
 | T2 | CodeBuddy Provider 可信度评估 / 备选后端 | 中 | `[?]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b;(2026-07-07 额度一度耗尽 `14019`,已换 key 恢复;推荐高性价比模型见 CLAUDE.md) |
-| T3 | 跨多次 LLM 调用的 token usage 累加 helper | 中 | `[ ]` | — |
+| T3 | 统一 token 计数入口(挂到 runner.completion 事件) | 中 | `[x]` | 内部 tracker 已聚合,补暴露(见 T3 正文);4 高性价比模型 usage 透传实测正常 |
 | T4 | 流式 usage 累加对非标准网关不鲁棒(可修复 bug) | 高 | `[x]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2 |
 | T5 | benchmark 默认钉本地版本(go.work 方案) | 中 | `[x]` | go.work 推 fork ✅ + setup 脚本 ✅ + 全流程验证通过(全新 clone,所有 trpc-agent-go 模块 => ../ 本地) |
 | T6 | 框架多处直接构造 `model.Request` 不设 Stream(已逐条复核:非静默失效,会显式报错;修法应在 provider 层兜底) | 中 | `[~]` | 见 T2 决策 |
@@ -33,8 +33,9 @@
 - **T1 摘要 prompt 升级(详细连续性)** → **已落地为 `WithDetailedContinuityPrompt`**(commit b1497d09)+ **实测验证**。设计被验证正确(claude-sonnet-4.6 下详细摘要字符数达基线 74960 量级);但澄清了适用边界——"详细必然提升 ROUGE-L"不成立,只对弱模型/默认摘要弱/on-demand 检索场景有效,强模型+纯摘要直接回答反而被冗长拖累(见 T8 验证结论)。
 - **CodeBuddy 网关 `ck_` key 额度**(2026-07-07):实测验证 benchmark 时一度耗尽(`code 14019`,claude 与 glm 均不可用);**已换 key 恢复**,glm-5.2/minimax-m3/kimi-k2.7/deepseek-v4-pro 实测均通。换 key 有个坑:当前 shell 的 `CODEBUDDY_API_KEY` 若残留旧 key,cb-chat/provider 不会重读 `~/.codebuddy.env`(见 CLAUDE.md "换 key 后的坑")。后续跑 benchmark **只用高性价比模型**(glm-5.2 等,见 CLAUDE.md),避免 claude 系虚高且易耗尽额度。
 - **T5 benchmark 默认钉本地**(2026-07-07,完成 + 全流程验证):go.work 推到用户 fork(`OneCuriousLearner/trpc-agent-go-benchmark`,分支 `feat/local-workspace`,含主模块+13 子模块 replace)。主仓库 `scripts/setup-benchmark-fork.sh` 把 benchmark submodule 切到 fork 分支。**全流程验证通过**(派 agent 在 `/tmp/test/` 全新 clone + 跑脚本):`go list -m all` 确认**所有** trpc-agent-go 模块都 `=> ../` 本地、无一走外部,三块 benchmark build 全过,主仓库 build 不受影响。验证中发现 4 个 model provider 子模块初版漏 replace,已补全。详见 T5 正文。
+- **T3 统一 token 计数入口**(2026-07-08,完成):核实发现框架内部 `InvokeAgentTracker` 早已聚合跨次 LLM 调用的 token,只是没暴露给调用方(只喂 telemetry)。补暴露:`tracker.TotalTokenUsage()`(含 cached)+ invocation state + `runner.completion` 事件 `Response.Usage`。调用方从最终事件拿聚合总量,不再自己累加。**澄清之前"minimax usage=0"是误报**(`env -u CODEBUDDY_API_KEY` 跟 provider 不重读文件 → 空key 401),四个高性价比模型 usage 透传实测正常。详见 T3 正文。
 
-**下一步聚焦**:T1 核心收口(2026-07-07)——prompt 升级 + 熔断器已完成并验证,可恢复裁剪经查证不做(归口 flow 层 compaction),多档阈值作为可选后续(对框架价值有限,无 UI 反馈需求)。下一步:用 glm-5.2 小样本验证熔断器真实网关行为,之后转下一个 T(积累改动后再跑 benchmark)。
+**下一步聚焦**:T1(prompt+熔断器+可恢复裁剪查证)、T3(统一 token 入口)、T5(benchmark 钉本地)均完成。当前剩余可做项:T1 多档阈值(可选,价值有限)、各 agent 冗余 token 累加清理(T3 留的已知项)。按"再完成一个 T 后跑 benchmark"的计划,现在攒了 T1/T3 多项改动,可以跑一轮 benchmark 看整体效果了(benchmark 已默认钉本地,用高性价比模型 glm-5.2/minimax-m3)。
 
 ---
 
@@ -141,11 +142,33 @@ Claude Code 把上下文管理做成一条**正交、可组合、分级触发**�
 
 ---
 
-## T3 — 跨多次 LLM 调用的 token usage 累加 helper `[ ]`
+## T3 — 跨多次 LLM 调用的 token usage 累加 → 统一入口(已完成) `[x]`
 
-- 现状:一次 `Runner.Run` 内若有工具调用,会发生多次 LLM 调用,**每次各有独立 Usage**;框架不在 Runner 层累加总量。要全程总消耗得消费端自己加(参考 `examples/tokentracker/main.go:296`)。
-- [ ] 评估是否提供一个内置 helper / event,聚合单次 Run 的总 token 消耗,免去每个调用方重复实现。
-- 注意:同样**不能依赖 CodeBuddy 网关 usage**(虚高)。
+> 2026-07-08 完成,commit bc9de534。
+
+### 核实后的真实状态(修正旧认知)
+
+- **跟 T4 不是一回事**。T4 是"一次 LLM 调用内、流式 chunk 之间"怎么累加(已修,take-last);T3 是"一次 Run 内、多次 LLM 调用之间"要不要给聚合出口。
+- **框架内部早已聚合**,不是"没有能力"。所有 agent 类型(llmagent/chainagent/graphagent)共用 `itelemetry.InvokeAgentTracker`,`TrackResponse` 跨多次 LLM 调用累加 totalPrompt/CompletionTokens。问题只是:① 结果只喂 telemetry(metrics)、没暴露给调用方;② 各 agent 又各自在外层重复累加了一份(`llm_agent.go`/`chain_agent.go:262-264`/`graph_agent.go:323`)——**冗余,非有意设计**(开发者各自抄了 llmagent 模式没收口,tracker 已做同样的事)。
+- **chainagent/graphagent 各自累加是冗余不是设计**——确认 `InvokeAgentTracker.TrackResponse` 内部已聚合,各 agent 外层那份是重复劳动。用户认同 chainagent/graphagent 价值已不大,这冗余印证之。
+
+### 做了什么(用户定:挂到结束事件)
+
+- `InvokeAgentTracker` 扩展记 `CachedTokens` + 加 `TotalTokenUsage()` 导出方法(返回 prompt/completion/total/cached)。
+- `agent.InvocationTokenUsageStateKey` + `Set/GetInvocationTokenUsage` helper 存 invocation state。
+- llmagent/chainagent/graphagent 在 `RecordMetrics` 前存 state;顶层 agent 的 tracker 已含子 agent(chainagent 转发子事件过父 tracker),顶层 invocation state = 整次 Run 总量。
+- `runner.emitRunnerCompletion` 读 state填 `runner.completion` 事件 `Response.Usage`。调用方从最终事件拿聚合总量,不再自己累加。
+
+### 验证
+
+- 单测:`TotalTokenUsage`(累加 prompt/completion/cached、partial 不计)、`Set/GetInvocationTokenUsage` round-trip。
+- 端到端实测(minimax-m3 + 工具):`runner.completion` 事件的聚合 usage 与手动累加 LLM 调用 usage 一致(prompt/completion/total/cached 全对齐)。
+- 四个高性价比模型(minimax-m3/glm-5.2/kimi-k2.7/deepseek-v4-pro)usage 透传实测均正常(澄清之前"minimax usage=0"是误报——根因是 `env -u CODEBUDDY_API_KEY` 跟 provider 不重读文件,导致空 key 401,非 usage 透传 bug)。
+- 回归 telemetry/agent/runner 全绿 + lint 干净。
+
+### 残留(未做)
+
+- 各 agent 冗余累加(`addWrappedTokenUsage` 等)只用于 span,不影响暴露总量,先保留作已知项,后续单独清理。
 
 ---
 
