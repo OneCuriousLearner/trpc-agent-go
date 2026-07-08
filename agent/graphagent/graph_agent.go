@@ -216,6 +216,7 @@ func (ga *GraphAgent) runWithBarrier(ctx context.Context, invocation *agent.Invo
 			)
 		}
 		tracker.SetResponseErrorType(resolveGraphAgentErrorType(fullRespEvent, operationErrorType))
+		agent.SetInvocationTokenUsage(invocation, tracker.TotalTokenUsage())
 		tracker.RecordMetrics()()
 		if tracingEnabled {
 			span.End()

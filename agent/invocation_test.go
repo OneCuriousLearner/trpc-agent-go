@@ -1502,3 +1502,30 @@ func TestWithUserMessageRewriter(t *testing.T) {
 		model.NewUserMessage("rewritten"),
 	}, msgs)
 }
+
+func TestInvocation_SetGetTokenUsage(t *testing.T) {
+	inv := NewInvocation()
+
+	// Not set yet -> ok=false, zero usage.
+	usage, ok := GetInvocationTokenUsage(inv)
+	require.False(t, ok)
+	require.Equal(t, model.Usage{}, usage)
+
+	// Set and get round-trip, including cached detail.
+	expected := model.Usage{
+		PromptTokens:     100,
+		CompletionTokens: 40,
+		TotalTokens:      140,
+	}
+	expected.PromptTokensDetails.CachedTokens = 12
+	SetInvocationTokenUsage(inv, expected)
+
+	got, ok := GetInvocationTokenUsage(inv)
+	require.True(t, ok)
+	require.Equal(t, expected, got)
+
+	// Nil invocation is safe.
+	SetInvocationTokenUsage(nil, expected)
+	_, ok = GetInvocationTokenUsage(nil)
+	require.False(t, ok)
+}

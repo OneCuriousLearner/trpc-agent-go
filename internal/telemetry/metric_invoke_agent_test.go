@@ -663,3 +663,49 @@ func TestInvokeAgentTracker_RecordMetrics_NoTokens(t *testing.T) {
 	metricNames := collectMetricNames(rm)
 	require.NotContains(t, metricNames, metrics.MetricTRPCAgentGoClientTimeToFirstToken)
 }
+
+func TestInvokeAgentTracker_TotalTokenUsage(t *testing.T) {
+	ctx := context.Background()
+	tracker := NewInvokeAgentTracker(ctx, nil, true, new(error))
+
+	// Nil tracker must not panic and returns zero usage.
+	var nilTracker *InvokeAgentTracker
+	require.Equal(t, model.Usage{}, nilTracker.TotalTokenUsage())
+
+	// Empty tracker returns zero usage.
+	require.Equal(t, model.Usage{}, tracker.TotalTokenUsage())
+
+	// Feed multiple non-partial responses; usage accumulates across calls.
+	tracker.TrackResponse(&model.Response{
+		Usage: &model.Usage{
+			PromptTokens:     10,
+			CompletionTokens: 5,
+			PromptTokensDetails: model.PromptTokensDetails{
+				CachedTokens: 2,
+			},
+		},
+	})
+	tracker.TrackResponse(&model.Response{
+		Usage: &model.Usage{
+			PromptTokens:     20,
+			CompletionTokens: 7,
+			PromptTokensDetails: model.PromptTokensDetails{
+				CachedTokens: 4,
+			},
+		},
+	})
+	// Partial responses must NOT be counted.
+	tracker.TrackResponse(&model.Response{
+		IsPartial: true,
+		Usage: &model.Usage{
+			PromptTokens:     999,
+			CompletionTokens: 999,
+		},
+	})
+
+	got := tracker.TotalTokenUsage()
+	require.Equal(t, 30, got.PromptTokens, "prompt should accumulate (10+20)")
+	require.Equal(t, 12, got.CompletionTokens, "completion should accumulate (5+7)")
+	require.Equal(t, 42, got.TotalTokens, "total should be prompt+completion")
+	require.Equal(t, 6, got.PromptTokensDetails.CachedTokens, "cached should accumulate (2+4)")
+}

@@ -1722,6 +1722,7 @@ func (a *LLMAgent) wrapEventChannelWithTelemetry(
 			finalizeWrappedTelemetry(
 				span,
 				tracker,
+				invocation,
 				fullRespEvent,
 				responseErrorType,
 				tokenUsage,
@@ -1755,6 +1756,7 @@ func (a *LLMAgent) wrapEventChannelWithTelemetry(
 func finalizeWrappedTelemetry(
 	span sdktrace.Span,
 	tracker *itelemetry.InvokeAgentTracker,
+	invocation *agent.Invocation,
 	fullRespEvent *event.Event,
 	responseErrorType string,
 	tokenUsage *itelemetry.TokenUsage,
@@ -1779,6 +1781,9 @@ func finalizeWrappedTelemetry(
 		}
 	}
 	tracker.SetResponseErrorType(responseErrorType)
+	// Surface the aggregated per-run token usage on the invocation state so the
+	// runner completion event can read it without re-accumulating from events.
+	agent.SetInvocationTokenUsage(invocation, tracker.TotalTokenUsage())
 	tracker.RecordMetrics()()
 	if startedSpan {
 		span.End()

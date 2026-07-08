@@ -123,6 +123,7 @@ func (a *ChainAgent) executeChainRun(
 	var trackerErr error
 	tracker := itelemetry.NewInvokeAgentTracker(ctx, invocation, stream, &trackerErr)
 	defer func() {
+		agent.SetInvocationTokenUsage(invocation, tracker.TotalTokenUsage())
 		tracker.RecordMetrics()()
 		if startedSpan {
 			span.End()

@@ -59,9 +59,10 @@ func TestFinalizeWrappedTelemetry_MarksSpanFromFallbackErrorType(t *testing.T) {
 	recorder := useSpanRecorder(t)
 	ctx, span := trace.Tracer.Start(context.Background(), "wrap")
 	var trackerErr error
+	invocation := &agent.Invocation{InvocationID: "id", AgentName: "agent"}
 	tracker := itelemetry.NewInvokeAgentTracker(
 		ctx,
-		&agent.Invocation{InvocationID: "id", AgentName: "agent"},
+		invocation,
 		false,
 		&trackerErr,
 	)
@@ -70,6 +71,7 @@ func TestFinalizeWrappedTelemetry_MarksSpanFromFallbackErrorType(t *testing.T) {
 	finalizeWrappedTelemetry(
 		span,
 		tracker,
+		invocation,
 		nil,
 		"rate_limit_429",
 		nil,

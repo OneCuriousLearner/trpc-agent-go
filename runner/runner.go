@@ -2756,6 +2756,15 @@ func (r *runner) emitRunnerCompletion(ctx context.Context, loop *eventLoopContex
 	}
 
 	agent.InjectIntoEvent(loop.invocation, runnerCompletionEvent)
+
+	// Surface the aggregated per-run token usage (accumulated by the agent's
+	// telemetry tracker) on the completion event so callers can read the
+	// total without re-accumulating from the event stream.
+	if usage, ok := agent.GetInvocationTokenUsage(loop.invocation); ok &&
+		runnerCompletionEvent.Response != nil {
+		runnerCompletionEvent.Response.Usage = &usage
+	}
+
 	runnerCompletionEvent = r.applyEventPlugins(
 		ctx,
 		loop.invocation,

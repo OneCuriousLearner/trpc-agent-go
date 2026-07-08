@@ -84,6 +84,7 @@ type InvokeAgentTracker struct {
 	firstTokenTimeDuration time.Duration
 	totalCompletionTokens  int
 	totalPromptTokens      int
+	totalCachedTokens      int
 
 	attributes invokeAgentAttributes
 }
@@ -130,7 +131,25 @@ func (t *InvokeAgentTracker) TrackResponse(response *model.Response) {
 	if !response.IsPartial && response.Usage != nil {
 		t.totalPromptTokens += response.Usage.PromptTokens
 		t.totalCompletionTokens += response.Usage.CompletionTokens
+		t.totalCachedTokens += response.Usage.PromptTokensDetails.CachedTokens
 	}
+}
+
+// TotalTokenUsage returns the aggregated token usage accumulated via
+// TrackResponse across all responses in this invocation. Exposed so callers
+// (e.g. the runner completion event, benchmarks) can read the per-run total
+// without re-accumulating it from the event stream themselves.
+func (t *InvokeAgentTracker) TotalTokenUsage() model.Usage {
+	if t == nil {
+		return model.Usage{}
+	}
+	u := model.Usage{
+		PromptTokens:     t.totalPromptTokens,
+		CompletionTokens: t.totalCompletionTokens,
+		TotalTokens:      t.totalPromptTokens + t.totalCompletionTokens,
+	}
+	u.PromptTokensDetails.CachedTokens = t.totalCachedTokens
+	return u
 }
 
 // SetResponseErrorType updates the response error type seen (for extracting error info).

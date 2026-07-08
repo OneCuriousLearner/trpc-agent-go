@@ -79,6 +79,12 @@ const (
 	// Runner checks this key to skip redundant async summary
 	// enqueue during the same run.
 	SyncSummaryIntraRunStateKey = "__sync_summary_intra_run__"
+
+	// InvocationTokenUsageStateKey stores the aggregated token usage for a
+	// run, set by the agent's telemetry tracker at run end and read by the
+	// runner completion event so callers can read the per-run total without
+	// re-accumulating from the event stream.
+	InvocationTokenUsageStateKey = "__invocation_token_usage__"
 )
 
 // TransferInfo contains information about a pending agent transfer.
@@ -2085,6 +2091,33 @@ func (inv *Invocation) GetState(key string) (any, bool) {
 	}
 	value, ok := inv.state[key]
 	return value, ok
+}
+
+// SetInvocationTokenUsage stores the aggregated token usage for this run on
+// the invocation state. Agents set it at run end from their telemetry
+// tracker; the runner completion event reads it to surface the per-run total.
+func SetInvocationTokenUsage(inv *Invocation, usage model.Usage) {
+	if inv == nil {
+		return
+	}
+	inv.SetState(InvocationTokenUsageStateKey, usage)
+}
+
+// GetInvocationTokenUsage reads the aggregated token usage stored by
+// SetInvocationTokenUsage. Returns the usage and true if set.
+func GetInvocationTokenUsage(inv *Invocation) (model.Usage, bool) {
+	if inv == nil {
+		return model.Usage{}, false
+	}
+	v, ok := inv.GetState(InvocationTokenUsageStateKey)
+	if !ok {
+		return model.Usage{}, false
+	}
+	usage, ok := v.(model.Usage)
+	if !ok {
+		return model.Usage{}, false
+	}
+	return usage, true
 }
 
 // GetStateValue retrieves a typed value from the invocation state.
