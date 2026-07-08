@@ -18,6 +18,8 @@
 | T7 | llmflow 主循环:空 completion 被判非 final → 死循环(真 bug,已修复);benchmark hang 实测证伪 | 高 | `[x]` | 由 T6 定位挖出 |
 | T8 | summary_ondemand 实跑取经 + 详细 prompt 已落地验证(`WithDetailedContinuityPrompt`,commit b1497d09) | 中 | `[~]` | 关联 T1;详 pgmt 验证见 T8 正文 |
 | T9 | 上下文计数改"增量叠加法"(API usage 基准 + 本地新增估算),对标 Claude Code | 中 | `[ ]` | 前置障碍:provider 间 usage 可信度不统一,留后做 |
+| T10 | `session/pgvector` SQL 写死 `NOW() AT TIME ZONE 'localtime'`(16 处)→ 非 TZ 环境报 22023 | 中 | `[ ]` | 2026-07-08 LongMemEval 复测挖出;当前靠 zoneinfo 软链绕过 |
+| T11 | `embedopenai.New` 默认维度 1536,不按模型自适应 → 换非 OpenAI embedder 维度不匹配 | 中 | `[ ]` | 2026-07-08 换 ollama nomic-embed-text(768)时挖出 |
 | _(后续挖掘持续追加)_ | | | | |
 
 ---
@@ -39,6 +41,8 @@
 **下一步聚焦**:T1(prompt+熔断器+可恢复裁剪查证)、T3(统一 token 入口)、T5(benchmark 钉本地)均完成。当前剩余可做项:T1 多档阈值(可选,价值有限)、各 agent 冗余 token 累加清理(T3 留的已知项)。按"再完成一个 T 后跑 benchmark"的计划,现在攒了 T1/T3 多项改动,可以跑一轮 benchmark 看整体效果了(benchmark 已默认钉本地,用高性价比模型 glm-5.2/minimax-m3)。
 
 - **benchmark 整体效果验证**(2026-07-08,完成):派 agent 用 minimax-m3 跑了 MT-Bench-101 CM(summary benchmark)。**benchmark 接 CodeBuddy 网关的通用修法落地**:三处 `openai.New`→`codebuddy.New`(codebuddy provider 强制 `Stream=true` 盖过 benchmark 硬编码 `Stream:false`),patch 留子模块工作区未提交。**T1 detailed-prompt 短对话实测**:CM 4 轮场景 detailed 反而多花 5.3% prompt(详细 prompt 本身更长、`-events 2` 阈值让摘要到第 3-4 轮才生成、节省来不及累积),但 retention 从 0.517 升到 0.692——与 LongMemEval 结论一致,detailed 价值在信息保留/检索不在短对话省 token。**T3 端到端验证**:runner.completion 事件 `Response.Usage` 非空合理(含 cached 字段,是聚合值硬证据),benchmark 取的就是它,两者一致。**局限**:3 case + num-runs=1 随机噪声大,仅方向性参考;长对话效果待 QMSum/LongMemEval 复测。详见 T8"补充实测"。
+
+- **LongMemEval pgvector 复测**(2026-07-08,完成 + 修正结论):为压制上轮小样本噪声,首次在本环境装通 pgvector(yum postgres 15.18 + 源码编译 pgvector 0.8.4,无 systemd 用 `runuser -u postgres -- initdb` 绕开),用 glm-5.2 + ollama nomic-embed-text(768 维)跑了 detailed on/off 各 8 case。**修正了上轮"detailed on-demand 比 default 高 3 倍"的过强说法**——没复现 3 倍,但得到更本质的结论:on-demand 检索是**兜底拉平器**而非 detailed 放大器(detailed summary 越强 on-demand 增量越小甚至变负,default 越弱 on-demand 增量越大)。detailed 真正价值是"让纯 summary 就够强"(multi-session 纯 summary 是 default 7.46 倍、EM 命中率 25-50%→75-100%),不是"配 on-demand 后更高"。与 T8"替代关系"论点吻合。**顺带挖到两个框架 bug**:T10(pgvector SQL 写死 `localtime` 非 TZ 环境报 22023)、T11(embedopenai 默认 1536 维不自适应)。**minimax-m3 不调 session_search 工具**(模型遵从问题,非框架 bug),on-demand 场景改用 glm-5.2。详见 T8"LongMemEval pgvector 复测"。
 
 ---
 
@@ -490,6 +494,35 @@ model was called 19094 times in 300ms
 ### T3 端到端验证(2026-07-08,本轮 benchmark 顺带验证)
 
 派 agent 跑 benchmark 时顺带验证了 T3(commit `bc9de534`)。临时探测程序(codebuddy+llmagent+runner 跑 3 轮)确认 `runner.completion` 事件 `Response.Usage` 非空且合理(prompt=290/completion=10/total=300/cached=254)。**cached=254 是聚合值的硬证据**——per-turn usage 不单独汇总 cached,只有 `InvokeAgentTracker` 跨整次 Run 累加才会出现。benchmark 的 `consumeEvents`(`shared.go:91`)用覆盖赋值取最后一个带 Usage 的事件,正好就是 runner.completion,两者一致。语义吻合 commit message 的"per-run aggregated"。
+
+### LongMemEval pgvector 复测(2026-07-08,修正"3 倍"结论)
+
+为压制上一轮 LongMemEval 小样本噪声(glm-5.0 不遵从 + claude 仅 3 case),这次用 **glm-5.2 + 真正的 pgvector 向量检索 + ollama nomic-embed-text(768 维)** 跑了 detailed on/off 各 8 case(multi-session 4 + knowledge-update 4),三模式自动对比。**环境首次装通 pgvector**(yum postgres 15.18 + 源码编译 pgvector 0.8.4,无 systemd 用 `runuser -u postgres -- initdb` 绕开)。
+
+> 名词对照(detailed vs default 比的到底是什么):**default 摘要**(`session/summary/summarizer.go:177 getDefaultSummarizerPrompt`)就一句话指令——"分析对话,给一份聚焦'对未来有用的重要信息'的**简洁**摘要,只留相关的、别杜撰",无结构、不逐字保留(实测产出 ~2 千字符)。**detailed 摘要**(`prompts.go:24 detailedContinuityPreamble`,`WithDetailedContinuityPrompt` 开启)是九段固定结构,§6 逐字保留所有用户消息、§9 指向 `session_search`/`session_load` 按需恢复(实测产出 ~5 万字符)。两者差距本质是"简洁 vs 信息密集",这正是后面所有对比的基底。
+
+**关键结论:上一轮"detailed on-demand 比 default 高 3 倍"这个具体数字没复现,但得到了一个更本质的结论。** 三组数据:
+
+| 场景 | detailed summary ROUGE-L | default summary ROUGE-L | detailed ondemand | default ondemand |
+|------|---|---|---|---|
+| multi-session(4 case) | 0.0438 | 0.0059(7.46x) | 0.0517 | 0.0516(持平) |
+| knowledge-update(4 case) | 0.2277 | 0.1360(1.67x) | 0.1218 | 0.1861(detailed 反低) |
+| 合计 8 case | 0.1358 | 0.0709 | 0.0868 | 0.1189(detailed 是 default 0.73x) |
+
+**新结论(比"3 倍"更准确)**:on-demand 检索是一个**兜底拉平器**,不是 detailed 的放大器:
+- detailed summary 越强,on-demand 增量越小甚至变负(multi-session gain +0.008、knowledge-update gain **-0.106**)。因为 detailed 摘要靠九段式+verbatim 已保留关键事实,模型直接答就准;on-demand 再去检索反而召回冗余/过时信息干扰回答(knowledge-update 问"最新值"时尤甚)。
+- default summary 越弱,on-demand 增量越大(multi-session 把 0.006 拉到 0.052,gain +0.046)。
+- **detailed 的真正价值是"让纯 summary 就够强"**(multi-session 纯 summary 是 default 7.46 倍、EM 命中率 25-50%→75-100%),而不是"配 on-demand 后更高"。
+
+这与 T8 第 477 行"摘要质量与按需检索是替代关系,非纯叠加"完全吻合,且修正了"3 倍"这个过强说法。**实践指导**:detailed summary 适合"verbatim 保留原始事实、靠摘要直接回答"的场景(长对话记忆/knowledge-update);若已配 on-demand 检索且用 default 弱摘要,detailed 的边际收益会被检索兜底拉平。最稳组合是 detailed summary 不依赖 on-demand(省检索延迟/token),或 default summary + on-demand 兜底,两者终点质量接近。
+
+**本次挖到的两个框架 bug(待立项)**:
+1. **`session/pgvector` 写死 `NOW() AT TIME ZONE 'localtime'`**(service_helper.go 等 16 处)。`localtime` 不是合法 Postgres 时区名,导致 `SQLSTATE 22023`。当前靠 `ln -s Asia/Shanghai /usr/share/zoneinfo/localtime` 软链绕过,根因是框架 SQL 不该硬编码 `localtime`。
+2. **`embedopenai.New` 默认维度 1536**,benchmark 的 `newLMEEmbeddingEmbedder` 没调 `WithDimensions`,换 ollama nomic-embed-text(768 维)时维度不匹配、embedding 写入全失败。应在 embedder 层按实际模型维度自适应或要求显式传参。
+
+**minimax-m3 不调工具**:on-demand 模式下 4 case 全是 `tools=(0/0)`,完全不主动调 `session_search`。同配置 glm-5.2 正常(每 case 1-8 次)。是模型指令遵从问题,非框架 bug。**后续跑 on-demand 场景避免用 minimax-m3**,用 glm-5.2 等工具遵从度好的模型。
+
+**局限**:8 case 仍小样本,逐 case 波动大(如 knowledge-update 某 case detailed summary 0.6441 但 on-demand 掉到 0.3125);只测 glm-5.2 一个模型;ROUGE-L 对长回答不友好放大噪声。定量精确需扩到 20+ case。完整日志 `/tmp/lme-glm-{true,false2,ku-true,ku-false}.log`。
 
 ### 待办
 

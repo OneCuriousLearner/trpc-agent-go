@@ -157,7 +157,7 @@ trpc-agent-go **已有**一套相当成熟的分级体系(见 [TODO.md T1](TODO.
 | L4 会话内存压缩 | `WithAddSessionSummary(true)` + summary 注入 | ✅ 已具备 |
 | L5 全量 LLM 摘要 | `maybeCompactContextBeforeLLM` 同步刷新 summary + 重建请求 | ✅ 已具备(逼近上限时触发) |
 | 四级阈值 | `ContextCompactionThresholdRatio`(单档 0.7) | ❌ **gap:只有单档,无 warning/error/blocking** |
-| 熔断器 | 无 | ❌ **gap:无连续失败保护** |
+| 熔断器 | `llmflow.go:1533`(连续失败 3 次停, per-run state `__context_compaction_failure_count__`) | ✅ 已具备(2026-07-08 源码复核,见 [context-management.md](context-management.md) §2.2) |
 | 摘要 prompt 两段式/九段 | 默认 summary prompt 较简单 | ❌ **gap:prompt 质量杠杆未用**(报告实证) |
 | 压缩后重试循环 | `maybeCompactContextBeforeLLM` 重建后继续 | ✅ 有重建,但**无"重新评估阈值"闭环** |
 | PTL 重试 | 无 | ❌ gap(优先级低) |
@@ -176,7 +176,8 @@ trpc-agent-go **已有**一套相当成熟的分级体系(见 [TODO.md T1](TODO.
 - 改动小:`session/summary` 加一个 detailed prompt option(类似 benchmark 用的九段式),非框架核心逻辑改动。
 - 风险低:默认行为不变,只是提供更好的 prompt 选项。
 
-### 高价值、低改动:熔断器(对应 §3.2)
+### ~~高价值、低改动:熔断器~~(对应 §3.2) ✅ 2026-07-08 已具备
+- **已实现**:`llmflow.go:1533` 连续失败 3 次停(per-run state `__context_compaction_failure_count__`)。见 [context-management.md](context-management.md) §2.2。
 - 跟刚修的 [T7](TODO.md)(空响应死循环)同属健壮性。
 - 改动小:`maybeCompactContextBeforeLLM` 路径加连续失败计数,超限跳过。
 - 有 BQ 数据支撑价值(250K API 调用/天)。

@@ -437,6 +437,17 @@ curl -s -o /dev/null -w <span class="s">"%{http_code}\n"</span> --max-time 2 htt
       file: 'context-management.html',
       date: '2026-07-08',
     },
+    {
+      id: 'detailed-prompt-eval',
+      figNo: 'FIG. 03',
+      kind: '实测验证',
+      title: '详细摘要，什么时候真有用',
+      sub: 'Detailed Summary Prompt Eval',
+      blurb: '给框架加的"详细摘要"开关，扔进短对话、长对话记忆、知识更新三个场景考。结论：它不是银弹，是"让纯摘要就够强"的手段，跟按需检索是替代不是叠加。修正了"检索领先 3 倍"的旧说法。',
+      tags: ['摘要 prompt', '按需检索', 'benchmark 实测'],
+      file: 'detailed-prompt-eval.html',
+      date: '2026-07-08',
+    },
   ];
 
   // ---- 渲染 ----

@@ -293,8 +293,8 @@
       <div class="mo-eyebrow">实测验证 · 2026-07-08 · CodeBuddy + glm-5.2</div>
       <h1>一次调用里，<br>有什么、<span class="accent">怎么裁</span>、怎么看。</h1>
       <p class="lede">
-        整个框架忙活半天，最后落到一次 LLM 调用上的，就是一个 <strong>Request</strong>——
-        一条 <strong>Messages</strong> 切片按顺序排着对话，加一个 <strong>Tools</strong> map 挂着可用工具。
+        整个框架忙活半天，最后落到一次 LLM 调用上的，就是一个 <strong>Request</strong></br>
+        ——一条 <strong>Messages</strong> 切片按顺序排着对话，加一个 <strong>Tools</strong> map 挂着可用工具。</br>
         这条切片就是<strong>真源</strong>。看懂它怎么组装、接近极限时怎么裁、怎么导出给前端，
         就拿到了上下文管理的全貌。
       </p>
@@ -313,7 +313,7 @@
       <div class="mo-sectionhead mo-reveal">
         <div class="mo-eyebrow">第一部分 · 上下文长什么样</div>
         <h2>一次调用里到底有什么</h2>
-        <p>下面是真实发往 CodeBuddy 网关（glm-5.2）的第三次请求的 dump——一个完整工具循环跑完、第二轮追问时，框架组装好的上下文。注意 <code style="font-family:'JetBrains Mono';font-size:14px;color:var(--blue);background:rgba(11,61,110,0.06);padding:1px 5px;border-radius:3px">[03]</code> 那条工具结果：它已经被压成了一个带恢复线索的占位符。</p>
+        <p>下面是真实发往 CodeBuddy 网关（glm-5.2）的第三次请求的 dump</br>——一个完整工具循环跑完、第二轮追问时，框架组装好的上下文。</br>注意 <code style="font-family:'JetBrains Mono';font-size:14px;color:var(--blue);background:rgba(11,61,110,0.06);padding:1px 5px;border-radius:3px">[03]</code> 那条工具结果：它已经被压成了一个带恢复线索的占位符。</p>
       </div>
 
       <div class="mo-fig mo-reveal">
@@ -394,7 +394,7 @@
       <div class="mo-sectionhead mo-reveal">
         <div class="mo-eyebrow">第三部分 · 接近极限</div>
         <h2>三层流水线，依次兜底</h2>
-        <p>上下文逼近极限时，三层按顺序裁：第一层在组装阶段把大工具结果压成可恢复占位符，第二层在超阈值时同步刷摘要重建，第三层在发请求前硬删中间整轮。前两层可恢复，最后一层是保命硬删。</p>
+        <p>上下文逼近极限时，三层按顺序裁：</br>第一层在组装阶段把大工具结果压成可恢复占位符，</br>第二层在超阈值时同步刷摘要重建，</br>第三层在发请求前硬删中间整轮。</br>前两层可恢复，最后一层是保命硬删。</p>
       </div>
 
       <div class="mo-pipe mo-reveal">
@@ -415,7 +415,7 @@
           <ul>
             <li>同步调 <code>CreateSessionSummary</code> 生成 / 刷新摘要</li>
             <li>摘要有推进 → clone 组装前的快照、重跑 ContentRequestProcessor（注入新摘要 + Pass 0/1/2 再跑一遍）+ 重放 skill 正文</li>
-            <li>有<strong>熔断器</strong>：连续失败 3 次就停（per-run 计数）</li>
+            <li>有<strong>熔断器</strong>：连续失败 3 次就停（per-run 计数。原本没有，我们参考 Claude Code 线上故障新增的）</li>
           </ul>
         </div>
 
@@ -443,7 +443,7 @@
       <div class="mo-sectionhead mo-reveal">
         <div class="mo-eyebrow">第四部分 · 压缩实测</div>
         <h2>2675 字节，怎么变成 447</h2>
-        <p>同一个工具结果，第一轮完整保留（当前请求受保护），第二轮被 Pass 1 压成占位符。占位符里带着 <code style="font-family:'JetBrains Mono';font-size:14px;color:var(--blue);background:rgba(11,61,110,0.06);padding:1px 5px;border-radius:3px">event_id</code> 等恢复线索——压缩不是有损丢弃，是把原始数据移出活动上下文、按需能捞回来。</p>
+        <p>同一个工具结果，第一轮完整保留（当前请求受保护），第二轮被 Pass 1 压成占位符。</br>占位符里带着 <code style="font-family:'JetBrains Mono';font-size:14px;color:var(--blue);background:rgba(11,61,110,0.06);padding:1px 5px;border-radius:3px">event_id</code> 等恢复线索——压缩不是有损丢弃，是把原始数据移出活动上下文、按需能捞回来。</p>
       </div>
 
       <div class="mo-compare mo-reveal">
@@ -456,7 +456,13 @@
  shard=00 level=INFO request_id=req-0000
  message=\"synthetic diagnostic payload...\"
  line 0001 service=payment shard=01 ...
+ ...
+ ...
+ ...
  ...(共 20 行，每行约 130 字节)...
+ ...
+ ...
+ ...
  line 0019 service=payment shard=03
  level=INFO request_id=req-0019 ..."}</div>
         </div>
@@ -502,7 +508,7 @@
       <div class="mo-sectionhead mo-reveal">
         <div class="mo-eyebrow">第五部分 · 怎么导出给前端</div>
         <h2>把上下文结构变成 JSON</h2>
-        <p>要给前端展示"消息顺序、token 估算、原文对照"，先得找到能拿到最终请求的接入点。下面是现状评估——只有一个点能拿到完整且可改写的真源。</p>
+        <p>未来要给前端展示"消息顺序、token 估算、原文对照"，先得找到能拿到最终请求的接入点。</br>下面是现状评估——只有一个点能拿到完整且可改写的真源。</p>
       </div>
 
       <table class="mo-table mo-reveal">

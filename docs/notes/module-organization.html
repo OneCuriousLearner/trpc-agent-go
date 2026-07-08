@@ -443,6 +443,7 @@
     border-radius:6px; padding:14px 16px;
     margin:16px 0; color:var(--ink);
     overflow-x:auto;
+    white-space:pre;
   }
   .mo-cancel .cancel-fig .arr{color:var(--signal)}
   .mo-cancel .cancel-fig .cm{color:var(--ink-3)}
@@ -525,7 +526,7 @@
       <div class="mo-eyebrow">写给改框架的人 · 2026-07-07 核实</div>
       <h1>五个模块，<br>怎么 <span class="accent">搭到一起</span>。</h1>
       <p class="lede">
-        trpc-agent-go 把<strong>工具、MCP、技能、会话、记忆</strong>五样东西，
+        trpc-agent-go 把<strong>工具、MCP、Skill、会话、记忆</strong>五样东西，
         在一次调用里拼成一个整体交给 Agent 用。Agent 干活时，
         工具又反过来找会话和记忆拿数据。<strong>这条来回的通路</strong>，就是理解整个框架的钥匙。
       </p>
@@ -537,7 +538,7 @@
   <span class="arr">│</span>
   <span class="arr">├─</span> 先把这次对话的草稿本翻出来     <span class="arr">──►</span> <span class="hl">会话服务</span>     <span class="cm">// 有就加载，没有就新建</span>
   <span class="arr">├─</span> 把几样东西打包成一个执行上下文
-  <span class="arr">│</span>   里面塞好：会话、记忆、工具、技能
+  <span class="arr">│</span>   里面塞好：会话、记忆、工具、Skill
   <span class="arr">│</span>
   <span class="arr">├─</span> 让 Agent 开始干活  <span class="arr">◄──</span>  工具要数据时，从这个上下文里找
   <span class="arr">│</span>   <span class="note">└─ 比如记忆工具会从上下文里拿到记忆服务，搜索工具会拿到会话服务</span>
@@ -630,7 +631,7 @@
 
         <!-- SKILL -->
         <article class="mo-mod mo-reveal">
-          <div class="mod-tag"><span class="num">模块三</span>技能仓库</div>
+          <div class="mod-tag"><span class="num">模块三</span>Skill 仓库</div>
           <h3>说明书库<span class="en">Skill</span></h3>
           <p class="mod-role">把复杂任务封装成一本本「说明书」（一个目录带一份 SKILL.md），需要时翻开，不需要时不占地方。</p>
           <div class="mo-metaphor">
@@ -641,15 +642,15 @@
           <div class="mo-cares">
             <div class="ct">三层信息，逐层打开</div>
             <ul>
-              <li><strong>第一层 · 看到名字</strong>：只把每本说明书的名字和一句话描述塞进提示词，让模型知道「有这些技能可用」</li>
-              <li><strong>第二层 · 翻开正文</strong>：模型觉得要用某技能，调一个工具把 SKILL.md 正文加载进上下文</li>
-              <li><strong>第三层 · 跑脚本</strong>：技能里带的脚本不会塞进提示词，而是在隔离的工作区里执行，只把结果带回来</li>
+              <li><strong>第一层 · 看到名字</strong>：只把每本说明书的名字和一句话描述塞进提示词，让模型知道「有这些 Skill 可用」</li>
+              <li><strong>第二层 · 翻开正文</strong>：模型觉得要用某 Skill ，调一个工具把 SKILL.md 正文加载进上下文</li>
+              <li><strong>第三层 · 跑脚本</strong>：Skill 里带的脚本不会塞进提示词，而是在隔离的工作区里执行，只把结果带回来</li>
             </ul>
           </div>
           <ul class="mo-modpoints">
-            <li>技能的加载状态记在会话里，按<strong>哪个 Agent 加载的</strong>分开存，所以多个 Agent 共用一次对话时不会互相串</li>
+            <li>Skill 的加载状态记在会话里，按<strong>哪个 Agent 加载的</strong>分开存，所以多个 Agent 共用一次对话时不会互相串</li>
             <li>说明书可以从本地目录读，也可以从网上的压缩包下载解压</li>
-            <li>跑脚本需要「代码执行器」配合——把技能目录搬进工作区再执行</li>
+            <li>跑脚本需要「代码执行器」配合——把 Skill 目录搬进工作区再执行</li>
           </ul>
         </article>
 
@@ -661,7 +662,7 @@
           <div class="mo-metaphor">
             <span class="lab">打个比方</span>
             像开会时手边的<strong>草稿本</strong>——记着这次讨论的来龙去脉。开新会就换新本子。
-            本子里还夹着几张便利贴（状态），比如「技能 A 已经加载了」「上次摘要到哪了」。
+            本子里还夹着几张便利贴（状态），比如「Skill  A 已经加载了」「上次摘要到哪了」。
           </div>
           <div class="mo-cares">
             <div class="ct">这个模块管这几件事</div>
@@ -747,7 +748,7 @@
       <div class="mo-sectionhead mo-reveal">
         <div class="mo-eyebrow">第三部分 · 接线图</div>
         <h2>六个模块怎么互相找</h2>
-        <p>这是全页的核心。模块不是各干各的——搜索工具按后端能力自动决定挂不挂、记忆工具从上下文反找服务、跑脚本要靠代码执行器、MCP 中转站和技能互为信息源、压缩掉的内容能按线索捞回来、外部记忆平台走投递口而不是直接接管。每条线都说清了<strong>谁需要谁、为什么</strong>。</p>
+        <p>这是全页的核心。模块不是各干各的——搜索工具按后端能力自动决定挂不挂、记忆工具从上下文反找服务、跑脚本要靠代码执行器、MCP 中转站和 Skill 互为信息源、压缩掉的内容能按线索捞回来、外部记忆平台走投递口而不是直接接管。每条线都说清了<strong>谁需要谁、为什么</strong>。</p>
       </div>
       <div class="mo-wiregrid mo-reveal">
 
@@ -769,21 +770,21 @@
           <div class="node left"><span class="nt">跑脚本工具</span><span class="ns">skill_run · skill_exec</span></div>
           <div class="wire-mid"><div class="wire-line"></div><span class="wire-label">搬进工作区再执行</span></div>
           <div class="node right"><span class="nt">代码执行器</span><span class="ns">提供运行环境</span></div>
-          <div class="why"><span class="id">线 三</span>跑脚本的工具先把技能目录搬进一个隔离的工作区，再让代码执行器在里面跑命令。这俩是<strong>独立的开关</strong>——配了执行器只是让跑脚本能用，不会顺手把别的代码也跑了。</div>
+          <div class="why"><span class="id">线 三</span>跑脚本的工具先把 Skill 目录搬进一个隔离的工作区，再让代码执行器在里面跑命令。这俩是<strong>独立的开关</strong>——配了执行器只是让跑脚本能用，不会顺手把别的代码也跑了。</div>
         </div>
 
         <div class="mo-wire">
           <div class="node left"><span class="nt">MCP 中转站</span><span class="ns">需要时去连外部</span></div>
-          <div class="wire-mid"><div class="wire-line"></div><span class="wire-label">技能告诉去哪连</span></div>
-          <div class="node right"><span class="nt">技能仓库</span><span class="ns">提供地址和能力说明</span></div>
-          <div class="why"><span class="id">线 四</span>中转站只管「怎么连、怎么调」，但它不知道「为什么要连这个」。技能正好补这层——技能加载后告诉模型「有这么个外部服务、地址是这个、能干这些」，模型再让中转站去连。</div>
+          <div class="wire-mid"><div class="wire-line"></div><span class="wire-label">Skill 告诉去哪连</span></div>
+          <div class="node right"><span class="nt">Skill 仓库</span><span class="ns">提供地址和能力说明</span></div>
+          <div class="why"><span class="id">线 四</span>中转站只管「怎么连、怎么调」，但它不知道「为什么要连这个」。Skill 正好补这层——Skill 加载后告诉模型「有这么个外部服务、地址是这个、能干这些」，模型再让中转站去连。</div>
         </div>
 
         <div class="mo-wire">
           <div class="node left"><span class="nt">上下文压缩</span><span class="ns">对话太长时压一压</span></div>
           <div class="wire-mid"><div class="wire-line"></div><span class="wire-label">留线索，按需捞回</span></div>
           <div class="node right"><span class="nt">按需取回工具</span><span class="ns">session_load</span></div>
-          <div class="why"><span class="id">线 五</span>压掉的内容不是真删，而是留个线索（事件编号）。模型发现还需要那段内容时，用取回工具按线索捞回来。<strong>压缩是移出活动区，不是有损丢弃。</strong></div>
+          <div class="why"><span class="id">线 五</span>压掉的内容不是真删，而是留个线索（事件编号）。模型发现还需要那段内容时，用取回工具按线索捞回来。<strong>压缩是移出活动区，不是永久有损丢弃。</strong></div>
         </div>
 
         <div class="mo-wire">
@@ -822,13 +823,13 @@
           <p>调用方先给这次调用起个名字（请求 ID），框架把这个名字和一个「取消开关」绑在一起存进表里。想叫停时，拿这个名字一查、一按，这次调用就停了。</p>
           <div class="cancel-fig">
 <span class="cm">// 调用方给这次调用起个名字</span>
-WithRequestID(id) <span class="arr">─►</span> 这次调用的名字
+WithRequestID(id)        <span class="arr">─►</span> 这次调用的名字
 <span class="cm">// 框架把名字和取消开关绑一起</span>
 registerRun(id, 取消开关) <span class="arr">─►</span> 存进表
 <span class="cm">// 想叫停时</span>
-Cancel(id)            <span class="arr">─►</span> 查表 <span class="arr">─►</span> 按取消开关
+Cancel(id)      <span class="arr">─►</span> 查表 <span class="arr">─►</span> 按取消开关
 <span class="cm">// 跑完或叫停后</span>
-注销(id)               <span class="arr">─►</span> 从表里删掉，防泄漏</div>
+注销(id)        <span class="arr">─►</span> 从表里删掉，防泄漏</div>
           <p>要叫停一次调用，<strong style="color:var(--signal)">应该去按这个取消开关</strong>，而不是在读取结果时直接跳出循环——因为 Agent 可能还在后台往通道里写，你跳出了它写不出去，就会卡住、漏内存。</p>
         </div>
 
@@ -863,8 +864,8 @@ Cancel(id)            <span class="arr">─►</span> 查表 <span class="arr">�
           <p>记忆服务（<code>MemoryService</code>）是框架直接管记忆的 CRUD 和自动提取；投递口（<code>Ingestor</code>）是框架只把对话丢给外部平台、不管存取。新增外部记忆平台，优先走投递口这条路。</p>
         </div>
         <div class="mo-note">
-          <h4>技能的加载状态按 Agent 分开存</h4>
-          <p>「技能 A 已经加载了」这种状态，是按哪个 Agent 加载的分开存的，所以多个 Agent 共用一次对话时不会互相串。改技能相关逻辑要保留这套隔离。</p>
+          <h4>Skill 的加载状态按 Agent 分开存</h4>
+          <p>「Skill A 已经加载了」这种状态，是按哪个 Agent 加载的分开存的，所以多个 Agent 共用一次对话时不会互相串。改 Skill 相关逻辑要保留这套隔离。</p>
         </div>
         <div class="mo-note">
           <h4>权限检查看的是改完之后的参数</h4>
