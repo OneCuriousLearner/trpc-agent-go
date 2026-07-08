@@ -17,6 +17,7 @@
 | T6 | 框架多处直接构造 `model.Request` 不设 Stream(已逐条复核:非静默失效,会显式报错;修法应在 provider 层兜底) | 中 | `[~]` | 见 T2 决策 |
 | T7 | llmflow 主循环:空 completion 被判非 final → 死循环(真 bug,已修复);benchmark hang 实测证伪 | 高 | `[x]` | 由 T6 定位挖出 |
 | T8 | summary_ondemand 实跑取经 + 详细 prompt 已落地验证(`WithDetailedContinuityPrompt`,commit b1497d09) | 中 | `[~]` | 关联 T1;详 pgmt 验证见 T8 正文 |
+| T9 | 上下文计数改"增量叠加法"(API usage 基准 + 本地新增估算),对标 Claude Code | 中 | `[ ]` | 前置障碍:provider 间 usage 可信度不统一,留后做 |
 | _(后续挖掘持续追加)_ | | | | |
 
 ---
@@ -36,6 +37,8 @@
 - **T3 统一 token 计数入口**(2026-07-08,完成):核实发现框架内部 `InvokeAgentTracker` 早已聚合跨次 LLM 调用的 token,只是没暴露给调用方(只喂 telemetry)。补暴露:`tracker.TotalTokenUsage()`(含 cached)+ invocation state + `runner.completion` 事件 `Response.Usage`。调用方从最终事件拿聚合总量,不再自己累加。**澄清之前"minimax usage=0"是误报**(`env -u CODEBUDDY_API_KEY` 跟 provider 不重读文件 → 空key 401),四个高性价比模型 usage 透传实测正常。详见 T3 正文。
 
 **下一步聚焦**:T1(prompt+熔断器+可恢复裁剪查证)、T3(统一 token 入口)、T5(benchmark 钉本地)均完成。当前剩余可做项:T1 多档阈值(可选,价值有限)、各 agent 冗余 token 累加清理(T3 留的已知项)。按"再完成一个 T 后跑 benchmark"的计划,现在攒了 T1/T3 多项改动,可以跑一轮 benchmark 看整体效果了(benchmark 已默认钉本地,用高性价比模型 glm-5.2/minimax-m3)。
+
+- **benchmark 整体效果验证**(2026-07-08,完成):派 agent 用 minimax-m3 跑了 MT-Bench-101 CM(summary benchmark)。**benchmark 接 CodeBuddy 网关的通用修法落地**:三处 `openai.New`→`codebuddy.New`(codebuddy provider 强制 `Stream=true` 盖过 benchmark 硬编码 `Stream:false`),patch 留子模块工作区未提交。**T1 detailed-prompt 短对话实测**:CM 4 轮场景 detailed 反而多花 5.3% prompt(详细 prompt 本身更长、`-events 2` 阈值让摘要到第 3-4 轮才生成、节省来不及累积),但 retention 从 0.517 升到 0.692——与 LongMemEval 结论一致,detailed 价值在信息保留/检索不在短对话省 token。**T3 端到端验证**:runner.completion 事件 `Response.Usage` 非空合理(含 cached 字段,是聚合值硬证据),benchmark 取的就是它,两者一致。**局限**:3 case + num-runs=1 随机噪声大,仅方向性参考;长对话效果待 QMSum/LongMemEval 复测。详见 T8"补充实测"。
 
 ---
 
@@ -475,6 +478,19 @@ model was called 19094 times in 300ms
 
 > 注:实测中 codebuddy 网关 `ck_` key 额度一度耗尽(`code 14019`,claude 与 glm 均不可用),claude-sonnet-4.6 detailed 模式仅成功 3 case。3 case 已足以支撑上述结论(prompt 正确性 + 字符量级对齐基线),但 ROUGE-L 数值为小样本,趋势性参考。(2026-07-07 额度已换 key 恢复,后续验证改用 glm-5.2 等高性价比模型。)
 
+### 补充实测:MT-Bench-101 CM 任务(短对话,2026-07-08)
+
+用 minimax-m3 + codebuddy provider 在 MT-Bench-101 CM 任务(每条 4 轮)跑了 detailed-prompt on/off 对比(`-task CM -num-cases 3 -llm-eval=false`,benchmark 默认钉本地)。**这次顺便验证了 benchmark 接网关的通用修法**:benchmark 三处 `openai.New`→`codebuddy.New`(`mtbench.go:167`/`qmsum.go:206`/`longmemeval.go:193`),codebuddy provider 强制 `Stream=true` 盖过 benchmark 硬编码的 `Stream:false`,patch 留在子模块工作区未提交。结论:
+
+- **detailed-prompt=true**:平均 prompt 反而**多花 5.3%**,但 retention 从 0.517 升到 **0.692**。
+- **detailed-prompt=false**:平均**省 10.7%** prompt,但 retention 只有 0.517。
+
+**与上一轮 LongMemEval 结论一致且互补**:detailed prompt 的价值在信息保留/检索召回,不在短对话省 token。CM 只有 4 轮、`-events 2` 触发阈值让摘要到第 3、4 轮才生成,节省来不及累积,详细 prompt 本身更长反而把那点节省抵消掉。**这进一步坐实"detailed 不是默认该开的银弹"**——长对话/高 events 阈值/on-demand 检索场景才是甜蜜点。**局限**:3 case + `num-runs=1`,LLM 随机性使 baseline 两次跑都有波动(CM_1145 baseline prompt 2453 vs 3163),结论仅方向性参考;后续应用 QMSum/LongMemEval 长上下文数据集或调大 num-cases/num-runs 复测。
+
+### T3 端到端验证(2026-07-08,本轮 benchmark 顺带验证)
+
+派 agent 跑 benchmark 时顺带验证了 T3(commit `bc9de534`)。临时探测程序(codebuddy+llmagent+runner 跑 3 轮)确认 `runner.completion` 事件 `Response.Usage` 非空且合理(prompt=290/completion=10/total=300/cached=254)。**cached=254 是聚合值的硬证据**——per-turn usage 不单独汇总 cached,只有 `InvokeAgentTracker` 跨整次 Run 累加才会出现。benchmark 的 `consumeEvents`(`shared.go:91`)用覆盖赋值取最后一个带 Usage 的事件,正好就是 runner.completion,两者一致。语义吻合 commit message 的"per-run aggregated"。
+
 ### 待办
 
 - [x] **精读 Claude Code compact 全部源码并提炼精华文档**(2026-07-06 完成):见 [claude-code-compact-design.md](claude-code-compact-design.md)。5 层分级流水线逐层拆解 + 横切设计(四级阈值/熔断器/两段式 prompt/缓存感知分流/PTL 重试/post-compact 附件恢复) + **对照 trpc-agent-go 现状标注 gap** + 给 T1 的启示。
@@ -495,3 +511,48 @@ model was called 19094 times in 300ms
 - `benchmark/summary/results/REPORT.zh_CN.md`(现成跑分报告 + 结论)
 - `benchmark/summary/trpc-agent-go-impl/qmsum.go` / `longmemeval.go`(summary_ondemand 场景实现,`WithAddSessionSummary(true)` + `WithEnableOnDemandSession(true)` 的标准用法)
 - `internal/session/tool/recall/`(`session_search` / `session_load` 工具实现)
+
+---
+
+## T9 — 上下文计数改"增量叠加法",对标 Claude Code `[ ]`
+
+> 2026-07-08 思考判断,留后做。前置障碍:provider 间 usage 可信度不统一,无法快速统一。
+
+### 两种计数机制(已核实两边源码)
+
+**Claude Code(`tokenCountWithEstimation`,`claude-code/src/utils/tokens.ts:226`)**:从消息列表末尾往回找最近一个带 usage 的 assistant 消息,用 `getTokenCountFromUsage(usage)`(**API 返回的真实 usage**)作基准,再把它之后新增的内容(user/tool_result)用 `roughTokenCountEstimationForMessages`(**本地字符估算**)叠加。即"**上一轮 API 真实 usage + 本地新增估算**"。
+
+**trpc-agent-go(`syncCompactContextDecision`,`internal/flow/llmflow/llmflow.go:~1988`)**:每次判断都 `counter.CountTokensRange(ctx, req.Messages, 0, len(req.Messages))` **全量重算整个消息列表**。默认 `SimpleTokenCounter`(`model/token_tailor.go:122`)用 `utf8.RuneCountInString` / `defaultApproxRunesPerToken=4.0`(4 字符≈1 token)粗估,**完全不读 API 返回的 usage**。框架虽有 `model/tiktoken` 可配更精确计数器(`WithTokenCounter`),但 provider 默认用 SimpleTokenCounter。
+
+### 判断:Claude Code 的增量叠加更合适,且 trpc-agent-go 有条件采纳
+
+- **准确度**:增量法以 API 真实 usage 为基准,只对新增(通常一小段 tool result)估算,误差压到最小;全量重算对整个历史粗估,误差随对话变长放大,**尤其中文场景严重**(中文 1 字常 1-2 token,4 字符≈1 token 的粗估低估中文 token 数)。这是实打实的精度差距。
+- **性能**:全量重算 O(n)、增量 O(新增),但 rune 计数快,实际非瓶颈。
+- **多 provider 兼容**:trpc-agent-go 全量估算法的好处是**不依赖 provider usage**——任何 provider 都能用,不踩 usage 不可信的坑。Claude Code 是单产品、usage 可信是前提。
+
+**关键**:trpc-agent-go 其实**已有 API usage 数据**(T3 刚暴露的 `InvokeAgentTracker`/runner.completion 聚合 usage),判断上下文超限时完全可用"上一轮真实 usage + 本地新增估算"的增量法。但 token 计数这条路径没用它,仍全量重算。
+
+### 真正的障碍:provider 间 usage 可信度不统一
+
+不能无脑采纳增量法——CodeBuddy 网关 usage 有失真风险(Claude 系虚高 ~7x、各模型族不一,见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b;T2 待决策)。若用不可信 usage 作基准,反而比全量估算更差。
+
+最稳:**usage 可信 → 增量法,不可信 → 回退全量估算**,两条路共存,由 provider 声明自己 usage 是否可信。但这要:
+1. provider 声明 usage 可信度(新能力,各 provider 标注)。
+2. token_tailor/context_compact 计数逻辑改成增量(若可信)或全量(若不可信)。
+3. 评估"上一轮 usage"在多轮工具循环里怎么取(可能要 tracker 记每轮 usage,不只聚合)。
+
+涉及 provider 体系改造,面较大。**留后做**——等 provider usage 可信度体系(T2 决策 + 可能的新声明能力)收敛后再做。当前 SimpleTokenCounter 全量估算法虽粗但能用,不阻塞功能。
+
+### 不做(边界)
+
+- 不改现有 token_tailor/context_compact 的计数逻辑(全量估算法保持现状)。
+- 不引入 provider usage 可信度声明(等 T2 决策)。
+- 仅记录思考判断,等条件成熟再实现。
+
+### 关键文件
+
+- `internal/flow/llmflow/llmflow.go`(`syncCompactContextDecision` ~1988:全量 `CountTokensRange` 判断超阈值)
+- `model/token_tailor.go`(`SimpleTokenCounter.CountTokens` :rune 粗估、`defaultApproxRunesPerToken=4.0`)
+- `model/tiktoken/tiktoken.go`(已有更精确计数器,但非默认)
+- `claude-code/src/utils/tokens.ts:226`(`tokenCountWithEstimation`:增量叠加法参照)
+- `internal/telemetry/metric_invoke_agent.go`(T3 暴露的聚合 usage,增量法的可用基准)
