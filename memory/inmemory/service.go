@@ -96,6 +96,7 @@ func NewMemoryService(options ...ServiceOpt) *MemoryService {
 			MemoryQueueSize:  opts.memoryQueueSize,
 			MemoryJobTimeout: opts.memoryJobTimeout,
 			EnabledTools:     opts.enabledTools,
+			OnError:          opts.autoMemoryOnError,
 		}
 		svc.autoMemoryWorker = imemory.NewAutoMemoryWorker(config, svc)
 		svc.autoMemoryWorker.Start()

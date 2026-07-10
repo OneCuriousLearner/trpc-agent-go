@@ -129,6 +129,10 @@ type ServiceOpts struct {
 	asyncMemoryNum   int
 	memoryQueueSize  int
 	memoryJobTimeout time.Duration
+	// autoMemoryOnError, when non-nil, is invoked when an async auto
+	// memory job fails. Lets callers observe background-extraction
+	// failures instead of finding them only as empty memories.
+	autoMemoryOnError imemory.AutoMemoryErrorHandler
 }
 
 func (o ServiceOpts) clone() ServiceOpts {
@@ -425,6 +429,18 @@ func WithMemoryQueueSize(size int) ServiceOpt {
 func WithMemoryJobTimeout(timeout time.Duration) ServiceOpt {
 	return func(opts *ServiceOpts) {
 		opts.memoryJobTimeout = timeout
+	}
+}
+
+// WithAutoMemoryOnError sets a handler invoked when an async auto memory
+// job fails (extraction, or a single add/update/delete/clear operation).
+// Use it to make background-extraction failures observable — e.g. bump a
+// counter or emit an event — instead of them only appearing as log lines.
+// The handler runs on the worker goroutine and must be non-blocking and
+// concurrency-safe. nil (the default) preserves the log-only behavior.
+func WithAutoMemoryOnError(handler imemory.AutoMemoryErrorHandler) ServiceOpt {
+	return func(opts *ServiceOpts) {
+		opts.autoMemoryOnError = handler
 	}
 }
 

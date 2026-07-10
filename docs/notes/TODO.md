@@ -14,7 +14,7 @@
 | T3 | 统一 token 计数入口(挂到 runner.completion 事件) | 中 | `[x]` | 内部 tracker 已聚合,补暴露(见 T3 正文);4 高性价比模型 usage 透传实测正常 |
 | T4 | 流式 usage 累加对非标准网关不鲁棒(可修复 bug) | 高 | `[x]` | 见 [codebuddy-gateway.md](codebuddy-gateway.md) §4b-2 |
 | T5 | benchmark 默认钉本地版本(go.work 方案) | 中 | `[x]` | go.work 推 fork ✅ + setup 脚本 ✅ + 全流程验证通过(全新 clone,所有 trpc-agent-go 模块 => ../ 本地) |
-| T6 | 框架多处直接构造 `model.Request` 不设 Stream(已逐条复核:非静默失效,会显式报错;修法应在 provider 层兜底) | 中 | `[~]` | 见 T2 决策 |
+| T6 | 框架多处直接构造 `model.Request` 不设 Stream(问题一:非静默,会显式报错,修法在 provider 层兜底,**待 T2 决策**);问题二:异步记忆抽取失败仅 WARN 不可见(已修:加 `OnError` 回调钩子) | 中 | `[~]` | 问题二已修;问题一见 T2 决策 |
 | T7 | llmflow 主循环:空 completion 被判非 final → 死循环(真 bug,已修复);benchmark hang 实测证伪 | 高 | `[x]` | 由 T6 定位挖出 |
 | T8 | summary_ondemand 实跑取经 + 详细 prompt 已落地验证(`WithDetailedContinuityPrompt`,commit b1497d09) | 中 | `[~]` | 关联 T1;详 pgmt 验证见 T8 正文 |
 | T9 | 上下文计数改"增量叠加法"(API usage 基准 + 本地新增估算),对标 Claude Code | 中 | `[ ]` | 前置障碍:provider 间 usage 可信度不统一,留后做 |
@@ -46,6 +46,7 @@
 
 - **T10 pgvector 写死 `localtime` 修复**(2026-07-10,完成 + 真实 pgvector 验证):`session/pgvector` 16 处 `NOW() AT TIME ZONE 'localtime'` → `LOCALTIMESTAMP`。根因:`localtime` 非合法 Postgres 时区名,标准(无 OS `localtime` 软链)环境报 `SQLSTATE 22023`(`ERROR: time zone "localtime" not recognized`);之前靠 `ln -s Asia/Shanghai /usr/share/zoneinfo/localtime` 软链绕过,换台机器/标准 PG 构建即炸。`LOCALTIMESTAMP` 是 SQL 标准关键字,按 session TimeZone 返回 `timestamp without time zone`,不依赖任何时区名解析,语义与原意图("取服务器本地时间、去时区、匹配 TIMESTAMP 列")完全等价。**真实 pgvector 验证**(连本机 postgres 15 + pgvector 0.8.4,不靠 mock):① psql 直测——临时移除软链后旧表达式报 22023、`LOCALTIMESTAMP` 正常返回 Asia/Shanghai 时间,软链已恢复;② 框架代码路径——`session/pgvector` Service `CreateSession`(写 expires_at)+ `GetSession`(执行含 `LOCALTIMESTAMP` 的过期判断 SQL)在无软链标准环境全通过、返回 session 无 22023。单测全绿(sqlmock 正则匹配不受影响)。
 - **T11 embedder 默认维度不自适应**(2026-07-10,核实:上游已修):核实发现上游 commit `60d5067d`(`{knowledge, session}: fix embedding dimensions for text-embedding-v4` #1666)已修——`embedopenai.Embedder` 加 `dimensionsSet` 标志,未显式 `WithDimensions` 且模型非 `text-embedding-3-*` 家族时,请求省略 `dimensions` 参数让服务端用默认维度。这正是 T11 想要的修法,TODO 状态此前过时。标 `[x]`,不再另行改动。
+- **T6 问题二:异步记忆抽取失败不可见**(2026-07-10,完成 + 真实网关验证):给 `AutoMemoryWorker` 加可配置 `OnError` 回调钩子(`AutoMemoryConfig.OnError`),5 个 memory 后端各加 `WithAutoMemoryOnError` option 透传,覆盖 job 失败 / extract 失败 / prepare 失败 / add/update/delete/clear 各操作失败全部出口;nil 时保留历史 log-only 行为。**真实 CodeBuddy 网关验证**:故障模型名 → 网关 400 → extractor 失败 → 异步 worker `reportError` → 钩子被触发、错误含真实网关 URL 与状态码、对调用方可见(对比修复前该 400 仅沉 WARN、调用方无信号,正是 7-03 benchmark auto 场景 F1=0 静默失效的根因)。单测 6 个 + 5 后端 build 通过。问题一(Stream 兼容)仍待 T2 决策,本轮只收问题二。
 
 ---
 
@@ -368,7 +369,24 @@ auto 场景(自动记忆抽取 + memory_search),inmemory 后端,claude-sonnet-4.
 
 **问题二(更值得修):异步任务的错误可见性。** memory 自动抽取的失败之所以像"静默",是因为它在后台 goroutine 里跑,错误只落到一条 WARN 日志、无人接。这跟 Stream 无关,是一类通病。
 
-- [ ] 评估给异步任务(自动记忆抽取、evolution 复盘等)加**可观测的失败上报**:计数器 / 事件 / 回调,让"后台任务连续失败"能被上层感知,而不是只在日志里。这比逐个设 Stream 更有普适价值。
+- [x] 给异步记忆抽取加**可观测的失败上报**:回调钩子,让"后台任务连续失败"能被上层感知,而不是只在日志里(2026-07-10 完成)。比逐个设 Stream 更有普适价值。
+
+#### 问题二落地(2026-07-10 完成 + 真实网关验证)
+
+给 `AutoMemoryWorker`(`memory/internal/memory/auto.go`)加可配置的错误回调钩子:
+
+- `AutoMemoryConfig` 新增 `OnError AutoMemoryErrorHandler` 字段;`AutoMemoryErrorHandler` 签名 `func(ctx, userKey memory.UserKey, err error)`。
+- `AutoMemoryWorker.reportError` 统一出口:`OnError` 为 nil 时 no-op(保留历史 log-only 行为),非 nil 时调用。**WARN 日志照打**(钩子是补充观测手段,非替代)。
+- 覆盖全部失败点:`processJob`(job 汇总失败)、`createAutoMemory`(prepare existing memories 失败、extract 失败)、`executeOperation`(add / update / update-not-found-add-fallback / delete / clear 各操作失败)。
+- 5 个后端(inmemory/sqlite/pgvector/mysql/mysqlvec)各自加 `WithAutoMemoryOnError` option 透传到 config,统一暴露给调用方。默认 nil,不改既有行为。
+
+**为什么值得做**:这正是 2026-07-03 memory benchmark auto 场景 F1=0.000 却"若无其事跑完"的根因——自动抽取在后台 goroutine 失败,错误只落 WARN,benchmark 侧 `waitForAutoExtraction` 轮询记忆条数等不到就超时返回 nil(不报错),两头叠加成"静默失效"。加钩子后,上层(Runner / benchmark / 业务)可直接观测后台抽取连续失败,不必 dump 记忆才发现。
+
+**真实网关验证**(连真实 CodeBuddy 网关,不 mock):codebuddy provider 用不存在的模型名打 `copilot.tencent.com/v2/chat/completions`,网关返 `400 Bad Request`;extractor 抽取失败 → 异步 worker `processJob` 收到错误 → `reportError` → `OnError` 钩子被触发,捕获到的 error 含真实网关 URL 和 400 状态码,对调用方完全可见。对比修复前该 400 仅沉在 WARN 日志、调用方拿不到任何信号。
+
+**单测**(`auto_test.go`):6 个测试覆盖 extract 失败、prepare 失败、4 种操作失败各触发一次且带正确 userKey、成功路径不触发、nil handler 不 panic。全套 memory 单测绿 + 5 后端 build 通过。
+
+**未做(边界)**:evolution 异步复盘等其它后台任务的错误可见性同属此类通病,但不在本轮范围;本轮只收 memory 自动抽取(最痛、有 benchmark 实证)。后续若需要可复用同样的 `OnError` 模式。
 
 ### 关键文件
 

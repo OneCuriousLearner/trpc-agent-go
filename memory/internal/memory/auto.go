@@ -145,7 +145,24 @@ type AutoMemoryConfig struct {
 	// are silently skipped. A non-nil empty map disables all
 	// operations.
 	EnabledTools map[string]struct{}
+	// OnError, when non-nil, is invoked whenever an async auto
+	// memory job fails — either the whole job (extract/prepare
+	// phase) or a single memory operation (add/update/delete/
+	// clear) within it. It is called from the worker goroutine,
+	// so it must not block and must be safe to call concurrently.
+	// When nil, failures are only logged (the historical
+	// behavior) and remain invisible to callers. This lets upper
+	// layers surface "background extraction keeps failing"
+	// instead of discovering it as silently-empty memories.
+	OnError AutoMemoryErrorHandler
 }
+
+// AutoMemoryErrorHandler is invoked by the auto memory worker when an
+// async extraction job (or a single operation within it) fails. It
+// receives the userKey the job was for and the error. Implementations
+// must be non-blocking and concurrency-safe; they typically bump a
+// counter or emit an event rather than perform heavy work.
+type AutoMemoryErrorHandler func(ctx context.Context, userKey memory.UserKey, err error)
 
 // EnabledToolsConfigurer is an optional capability interface.
 // Extractors that implement it can receive enabled tool flags
@@ -210,6 +227,23 @@ func NewAutoMemoryWorker(
 		config:   config,
 		operator: operator,
 	}
+}
+
+// reportError surfaces an async memory failure to the configured
+// OnError handler. It is a no-op when no handler is set, preserving
+// the historical log-only behavior. The error is always logged first
+// (by the caller, with context), so the handler is an addition for
+// upper layers that need to observe background failures, not a
+// replacement for logging.
+func (w *AutoMemoryWorker) reportError(
+	ctx context.Context,
+	userKey memory.UserKey,
+	err error,
+) {
+	if w.config.OnError == nil || err == nil {
+		return
+	}
+	w.config.OnError(ctx, userKey, err)
 }
 
 // Start starts the async memory workers.
@@ -383,6 +417,7 @@ func (w *AutoMemoryWorker) processJob(job *MemoryJob) {
 	if err := w.createAutoMemory(ctx, job.UserKey, job.Messages); err != nil {
 		log.WarnfContext(ctx, "auto_memory: job failed for user %s/%s: %v",
 			job.UserKey.AppName, job.UserKey.UserID, err)
+		w.reportError(ctx, job.UserKey, err)
 		return
 	}
 	writeLastExtractAt(job.Session, job.LatestTs)
@@ -406,7 +441,9 @@ func (w *AutoMemoryWorker) createAutoMemory(
 	if err != nil {
 		log.WarnfContext(ctx, "auto_memory: failed to prepare existing memories for user %s/%s: %v",
 			userKey.AppName, userKey.UserID, err)
-		return fmt.Errorf("auto_memory: prepare existing memories failed: %w", err)
+		err = fmt.Errorf("auto_memory: prepare existing memories failed: %w", err)
+		w.reportError(ctx, userKey, err)
+		return err
 	}
 
 	// Extract memory operations.
@@ -414,7 +451,9 @@ func (w *AutoMemoryWorker) createAutoMemory(
 	if err != nil {
 		log.WarnfContext(ctx, "auto_memory: extraction failed for user %s/%s: %v",
 			userKey.AppName, userKey.UserID, err)
-		return fmt.Errorf("auto_memory: extract failed: %w", err)
+		err = fmt.Errorf("auto_memory: extract failed: %w", err)
+		w.reportError(ctx, userKey, err)
+		return err
 	}
 
 	// Reconcile Add operations against the store so that near-duplicate
@@ -564,6 +603,7 @@ func (w *AutoMemoryWorker) executeOperation(
 				"auto_memory: add memory failed "+
 					"for user %s/%s: %v",
 				userKey.AppName, userKey.UserID, err)
+			w.reportError(ctx, userKey, fmt.Errorf("auto_memory: add memory failed: %w", err))
 		}
 	case extractor.OperationUpdate:
 		memKey := memory.Key{
@@ -596,6 +636,8 @@ func (w *AutoMemoryWorker) executeOperation(
 						userKey.AppName, userKey.UserID,
 						op.MemoryID, addErr,
 					)
+					w.reportError(ctx, userKey,
+						fmt.Errorf("auto_memory: update missing, add memory failed: %w", addErr))
 				}
 				return
 			}
@@ -604,6 +646,7 @@ func (w *AutoMemoryWorker) executeOperation(
 					"for user %s/%s, memory_id=%s: %v",
 				userKey.AppName, userKey.UserID,
 				op.MemoryID, err)
+			w.reportError(ctx, userKey, fmt.Errorf("auto_memory: update memory failed: %w", err))
 		}
 	case extractor.OperationDelete:
 		memKey := memory.Key{
@@ -614,11 +657,13 @@ func (w *AutoMemoryWorker) executeOperation(
 		if err := w.operator.DeleteMemory(ctx, memKey); err != nil {
 			log.WarnfContext(ctx, "auto_memory: delete memory failed for user %s/%s, memory_id=%s: %v",
 				userKey.AppName, userKey.UserID, op.MemoryID, err)
+			w.reportError(ctx, userKey, fmt.Errorf("auto_memory: delete memory failed: %w", err))
 		}
 	case extractor.OperationClear:
 		if err := w.operator.ClearMemories(ctx, userKey); err != nil {
 			log.WarnfContext(ctx, "auto_memory: clear memories failed for user %s/%s: %v",
 				userKey.AppName, userKey.UserID, err)
+			w.reportError(ctx, userKey, fmt.Errorf("auto_memory: clear memories failed: %w", err))
 		}
 	default:
 		log.WarnfContext(ctx, "auto_memory: unknown operation type '%s' for user %s/%s",

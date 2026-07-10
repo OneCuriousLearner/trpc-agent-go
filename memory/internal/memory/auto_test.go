@@ -2257,3 +2257,195 @@ func TestReconcileOps_PrefersHigherTierCandidate(t *testing.T) {
 	require.Empty(t, out,
 		"reconcile should drop the Add based on the tier-skip candidate rather than keep it based on a tier-none Jaccard winner")
 }
+
+// errorCollector is a test AutoMemoryErrorHandler that records every
+// failure it observes. It is safe for concurrent use (the worker calls
+// OnError from its goroutine).
+type errorCollector struct {
+	mu   sync.Mutex
+	jobs []collectedError
+}
+
+type collectedError struct {
+	userKey memory.UserKey
+	err     error
+}
+
+func (c *errorCollector) handler() AutoMemoryErrorHandler {
+	return func(_ context.Context, userKey memory.UserKey, err error) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.jobs = append(c.jobs, collectedError{userKey: userKey, err: err})
+	}
+}
+
+func (c *errorCollector) count() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.jobs)
+}
+
+func (c *errorCollector) last() collectedError {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if len(c.jobs) == 0 {
+		return collectedError{}
+	}
+	return c.jobs[len(c.jobs)-1]
+}
+
+func TestAutoMemoryWorker_OnError_ExtractFailure(t *testing.T) {
+	ext := &mockExtractor{err: errors.New("extract error")}
+	op := newMockOperator()
+	collector := &errorCollector{}
+	worker := NewAutoMemoryWorker(AutoMemoryConfig{
+		Extractor: ext,
+		OnError:   collector.handler(),
+	}, op)
+
+	userKey := memory.UserKey{AppName: "test-app", UserID: "user-1"}
+	err := worker.createAutoMemory(context.Background(), userKey,
+		[]model.Message{model.NewUserMessage("hello")})
+
+	// The job-level failure is reported to the handler AND returned.
+	require.Error(t, err)
+	assert.Equal(t, 1, collector.count(), "OnError should fire for an extract failure")
+	got := collector.last()
+	assert.Equal(t, userKey, got.userKey, "OnError should carry the failing userKey")
+	assert.Contains(t, got.err.Error(), "extract failed")
+}
+
+func TestAutoMemoryWorker_OnError_PrepareFailure(t *testing.T) {
+	ext := &mockExtractor{ops: []*extractor.Operation{}}
+	op := newMockOperator()
+	op.searchErr = errors.New("search error")
+	op.readErr = errors.New("read error")
+	collector := &errorCollector{}
+	worker := NewAutoMemoryWorker(AutoMemoryConfig{
+		Extractor: ext,
+		OnError:   collector.handler(),
+	}, op)
+
+	err := worker.createAutoMemory(context.Background(), memory.UserKey{
+		AppName: "test-app", UserID: "user-1",
+	}, []model.Message{model.NewUserMessage("hello")})
+
+	require.Error(t, err)
+	assert.Equal(t, 1, collector.count(), "OnError should fire when preparing existing memories fails")
+	assert.Contains(t, collector.last().err.Error(), "prepare existing memories failed")
+}
+
+func TestAutoMemoryWorker_OnError_OperationFailures(t *testing.T) {
+	// Each failing operation type should report exactly one error, with
+	// the right userKey, without the worker panicking.
+	t.Run("add", func(t *testing.T) {
+		op := newMockOperator()
+		op.addErr = errors.New("add error")
+		collector := &errorCollector{}
+		worker := &AutoMemoryWorker{
+			config:   AutoMemoryConfig{OnError: collector.handler()},
+			operator: op,
+		}
+		userKey := memory.UserKey{AppName: "test-app", UserID: "user-1"}
+		worker.executeOperation(context.Background(), userKey, &extractor.Operation{
+			Type:   extractor.OperationAdd,
+			Memory: "Test memory.",
+		})
+		assert.Equal(t, 1, collector.count())
+		assert.Equal(t, userKey, collector.last().userKey)
+		assert.Contains(t, collector.last().err.Error(), "add memory failed")
+	})
+
+	t.Run("update", func(t *testing.T) {
+		op := newMockOperator()
+		op.updateErr = errors.New("update error")
+		collector := &errorCollector{}
+		worker := &AutoMemoryWorker{
+			config:   AutoMemoryConfig{OnError: collector.handler()},
+			operator: op,
+		}
+		worker.executeOperation(context.Background(), memory.UserKey{
+			AppName: "test-app", UserID: "user-1",
+		}, &extractor.Operation{
+			Type:     extractor.OperationUpdate,
+			MemoryID: "mem-123",
+			Memory:   "Updated memory.",
+		})
+		assert.Equal(t, 1, collector.count())
+		assert.Contains(t, collector.last().err.Error(), "update memory failed")
+	})
+
+	t.Run("delete", func(t *testing.T) {
+		op := newMockOperator()
+		op.deleteErr = errors.New("delete error")
+		collector := &errorCollector{}
+		worker := &AutoMemoryWorker{
+			config:   AutoMemoryConfig{OnError: collector.handler()},
+			operator: op,
+		}
+		worker.executeOperation(context.Background(), memory.UserKey{
+			AppName: "test-app", UserID: "user-1",
+		}, &extractor.Operation{
+			Type:     extractor.OperationDelete,
+			MemoryID: "mem-456",
+		})
+		assert.Equal(t, 1, collector.count())
+		assert.Contains(t, collector.last().err.Error(), "delete memory failed")
+	})
+
+	t.Run("clear", func(t *testing.T) {
+		op := newMockOperator()
+		op.clearErr = errors.New("clear error")
+		collector := &errorCollector{}
+		worker := &AutoMemoryWorker{
+			config:   AutoMemoryConfig{OnError: collector.handler()},
+			operator: op,
+		}
+		worker.executeOperation(context.Background(), memory.UserKey{
+			AppName: "test-app", UserID: "user-1",
+		}, &extractor.Operation{Type: extractor.OperationClear})
+		assert.Equal(t, 1, collector.count())
+		assert.Contains(t, collector.last().err.Error(), "clear memories failed")
+	})
+}
+
+func TestAutoMemoryWorker_OnError_SuccessPathNotInvoked(t *testing.T) {
+	// When extraction and every operation succeed, OnError must never fire.
+	ext := &mockExtractor{
+		ops: []*extractor.Operation{
+			{Type: extractor.OperationAdd, Memory: "ok memory"},
+		},
+	}
+	op := newMockOperator()
+	collector := &errorCollector{}
+	worker := NewAutoMemoryWorker(AutoMemoryConfig{
+		Extractor: ext,
+		OnError:   collector.handler(),
+	}, op)
+
+	err := worker.createAutoMemory(context.Background(), memory.UserKey{
+		AppName: "test-app", UserID: "user-1",
+	}, []model.Message{model.NewUserMessage("hello")})
+
+	require.NoError(t, err)
+	assert.Equal(t, 0, collector.count(), "OnError must not fire on the success path")
+	assert.Equal(t, 1, op.addCalls)
+}
+
+func TestAutoMemoryWorker_OnError_NilHandlerIsNoop(t *testing.T) {
+	// Default config (nil OnError) must keep the historical log-only
+	// behavior and not panic on any failure path.
+	ext := &mockExtractor{err: errors.New("extract error")}
+	op := newMockOperator()
+	op.addErr = errors.New("add error")
+	worker := NewAutoMemoryWorker(AutoMemoryConfig{Extractor: ext}, op)
+
+	assert.NotPanics(t, func() {
+		_ = worker.createAutoMemory(context.Background(), memory.UserKey{
+			AppName: "test-app", UserID: "user-1",
+		}, []model.Message{model.NewUserMessage("hello")})
+		worker.executeOperation(context.Background(), memory.UserKey{
+			AppName: "test-app", UserID: "user-1",
+		}, &extractor.Operation{Type: extractor.OperationAdd, Memory: "x"})
+	})
+}
