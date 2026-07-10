@@ -18,8 +18,8 @@
 | T7 | llmflow 主循环:空 completion 被判非 final → 死循环(真 bug,已修复);benchmark hang 实测证伪 | 高 | `[x]` | 由 T6 定位挖出 |
 | T8 | summary_ondemand 实跑取经 + 详细 prompt 已落地验证(`WithDetailedContinuityPrompt`,commit b1497d09) | 中 | `[~]` | 关联 T1;详 pgmt 验证见 T8 正文 |
 | T9 | 上下文计数改"增量叠加法"(API usage 基准 + 本地新增估算),对标 Claude Code | 中 | `[ ]` | 前置障碍:provider 间 usage 可信度不统一,留后做 |
-| T10 | `session/pgvector` SQL 写死 `NOW() AT TIME ZONE 'localtime'`(16 处)→ 非 TZ 环境报 22023 | 中 | `[ ]` | 2026-07-08 LongMemEval 复测挖出;当前靠 zoneinfo 软链绕过 |
-| T11 | `embedopenai.New` 默认维度 1536,不按模型自适应 → 换非 OpenAI embedder 维度不匹配 | 中 | `[ ]` | 2026-07-08 换 ollama nomic-embed-text(768)时挖出 |
+| T10 | `session/pgvector` SQL 写死 `NOW() AT TIME ZONE 'localtime'`(16 处)→ 非 TZ 环境报 22023(已修:16 处→`LOCALTIMESTAMP`) | 中 | `[x]` | 真实 pgvector 验证:无软链复现 22023+修复通过 |
+| T11 | `embedopenai.New` 默认维度 1536,不按模型自适应 → 换非 OpenAI embedder 维度不匹配(上游已修) | 中 | `[x]` | 上游 commit `60d5067d`(#1666):非 text-embedding-3-* 未设 WithDimensions 时省略 dimensions,用服务端默认 |
 | _(后续挖掘持续追加)_ | | | | |
 
 ---
@@ -43,6 +43,9 @@
 - **benchmark 整体效果验证**(2026-07-08,完成):派 agent 用 minimax-m3 跑了 MT-Bench-101 CM(summary benchmark)。**benchmark 接 CodeBuddy 网关的通用修法落地**:三处 `openai.New`→`codebuddy.New`(codebuddy provider 强制 `Stream=true` 盖过 benchmark 硬编码 `Stream:false`),patch 留子模块工作区未提交。**T1 detailed-prompt 短对话实测**:CM 4 轮场景 detailed 反而多花 5.3% prompt(详细 prompt 本身更长、`-events 2` 阈值让摘要到第 3-4 轮才生成、节省来不及累积),但 retention 从 0.517 升到 0.692——与 LongMemEval 结论一致,detailed 价值在信息保留/检索不在短对话省 token。**T3 端到端验证**:runner.completion 事件 `Response.Usage` 非空合理(含 cached 字段,是聚合值硬证据),benchmark 取的就是它,两者一致。**局限**:3 case + num-runs=1 随机噪声大,仅方向性参考;长对话效果待 QMSum/LongMemEval 复测。详见 T8"补充实测"。
 
 - **LongMemEval pgvector 复测**(2026-07-08,完成 + 修正结论):为压制上轮小样本噪声,首次在本环境装通 pgvector(yum postgres 15.18 + 源码编译 pgvector 0.8.4,无 systemd 用 `runuser -u postgres -- initdb` 绕开),用 glm-5.2 + ollama nomic-embed-text(768 维)跑了 detailed on/off 各 8 case。**修正了上轮"detailed on-demand 比 default 高 3 倍"的过强说法**——没复现 3 倍,但得到更本质的结论:on-demand 检索是**兜底拉平器**而非 detailed 放大器(detailed summary 越强 on-demand 增量越小甚至变负,default 越弱 on-demand 增量越大)。detailed 真正价值是"让纯 summary 就够强"(multi-session 纯 summary 是 default 7.46 倍、EM 命中率 25-50%→75-100%),不是"配 on-demand 后更高"。与 T8"替代关系"论点吻合。**顺带挖到两个框架 bug**:T10(pgvector SQL 写死 `localtime` 非 TZ 环境报 22023)、T11(embedopenai 默认 1536 维不自适应)。**minimax-m3 不调 session_search 工具**(模型遵从问题,非框架 bug),on-demand 场景改用 glm-5.2。详见 T8"LongMemEval pgvector 复测"。
+
+- **T10 pgvector 写死 `localtime` 修复**(2026-07-10,完成 + 真实 pgvector 验证):`session/pgvector` 16 处 `NOW() AT TIME ZONE 'localtime'` → `LOCALTIMESTAMP`。根因:`localtime` 非合法 Postgres 时区名,标准(无 OS `localtime` 软链)环境报 `SQLSTATE 22023`(`ERROR: time zone "localtime" not recognized`);之前靠 `ln -s Asia/Shanghai /usr/share/zoneinfo/localtime` 软链绕过,换台机器/标准 PG 构建即炸。`LOCALTIMESTAMP` 是 SQL 标准关键字,按 session TimeZone 返回 `timestamp without time zone`,不依赖任何时区名解析,语义与原意图("取服务器本地时间、去时区、匹配 TIMESTAMP 列")完全等价。**真实 pgvector 验证**(连本机 postgres 15 + pgvector 0.8.4,不靠 mock):① psql 直测——临时移除软链后旧表达式报 22023、`LOCALTIMESTAMP` 正常返回 Asia/Shanghai 时间,软链已恢复;② 框架代码路径——`session/pgvector` Service `CreateSession`(写 expires_at)+ `GetSession`(执行含 `LOCALTIMESTAMP` 的过期判断 SQL)在无软链标准环境全通过、返回 session 无 22023。单测全绿(sqlmock 正则匹配不受影响)。
+- **T11 embedder 默认维度不自适应**(2026-07-10,核实:上游已修):核实发现上游 commit `60d5067d`(`{knowledge, session}: fix embedding dimensions for text-embedding-v4` #1666)已修——`embedopenai.Embedder` 加 `dimensionsSet` 标志,未显式 `WithDimensions` 且模型非 `text-embedding-3-*` 家族时,请求省略 `dimensions` 参数让服务端用默认维度。这正是 T11 想要的修法,TODO 状态此前过时。标 `[x]`,不再另行改动。
 
 ---
 

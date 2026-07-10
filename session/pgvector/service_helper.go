@@ -29,7 +29,7 @@ func (s *Service) getSession(
 	afterTime time.Time,
 ) (*session.Session, error) {
 	// Query session state.
-	// Use NOW() AT TIME ZONE 'localtime' to get the server's local
+	// Use LOCALTIMESTAMP to get the server's local
 	// time without timezone, matching the TIMESTAMP column type.
 	var sessState *SessionState
 	stateQuery := fmt.Sprintf(
@@ -37,7 +37,7 @@ func (s *Service) getSession(
 		FROM %s
 		WHERE app_name = $1 AND user_id = $2
 		AND session_id = $3
-		AND (expires_at IS NULL OR expires_at > NOW() AT TIME ZONE 'localtime')
+		AND (expires_at IS NULL OR expires_at > LOCALTIMESTAMP)
 		AND deleted_at IS NULL`,
 		s.tableSessionStates,
 	)
@@ -174,7 +174,7 @@ func (s *Service) listSessions(
 		created_at, updated_at
 		FROM %s
 		WHERE app_name = $1 AND user_id = $2
-		AND (expires_at IS NULL OR expires_at > NOW() AT TIME ZONE 'localtime')
+		AND (expires_at IS NULL OR expires_at > LOCALTIMESTAMP)
 		AND deleted_at IS NULL
 		ORDER BY updated_at DESC, session_id DESC`,
 		s.tableSessionStates,
@@ -959,7 +959,7 @@ func (s *Service) getTrackEvents(
 					AND session_id = $3
 					AND track = $4
 					AND (expires_at IS NULL
-						OR expires_at > NOW() AT TIME ZONE 'localtime')
+						OR expires_at > LOCALTIMESTAMP)
 					AND created_at > $5
 					AND deleted_at IS NULL
 					ORDER BY created_at DESC
@@ -979,7 +979,7 @@ func (s *Service) getTrackEvents(
 					AND session_id = $3
 					AND track = $4
 					AND (expires_at IS NULL
-						OR expires_at > NOW() AT TIME ZONE 'localtime')
+						OR expires_at > LOCALTIMESTAMP)
 					AND created_at > $5
 					AND deleted_at IS NULL
 					ORDER BY created_at DESC`,
@@ -1095,7 +1095,7 @@ func (s *Service) getSummariesList(
 		FROM %s
 		WHERE app_name = $1 AND user_id = $2
 		AND session_id = ANY($3::varchar[])
-		AND (expires_at IS NULL OR expires_at > NOW() AT TIME ZONE 'localtime')
+		AND (expires_at IS NULL OR expires_at > LOCALTIMESTAMP)
 		AND deleted_at IS NULL`,
 		summaryColumns,
 		s.tableSessionSummaries,
