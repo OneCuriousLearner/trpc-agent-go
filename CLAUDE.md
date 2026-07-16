@@ -160,7 +160,9 @@ Plugin、Team、Evaluation、HTTP Service、Gateway、可观测、trpc agent 命
 
 ## CodeBuddy 网关密钥(ck_)的安全使用【护网期间收紧安全限制】
 
-`ck_` 前缀的访问密钥是 CodeBuddy CLI 凭据(对应 env `CODEBUDDY_API_KEY`),可直连内网模型网关 `copilot.tencent.com/v2/chat/completions`(端点/请求头/模型清单/踩坑见 `docs/notes/codebuddy-gateway.md`)。**严禁把 `ck_` 明文贴进对话、写进代码或提交到仓库**——它会进对话历史/transcript,可能被缓存或回放。统一走环境变量:
+`ck_` 前缀的访问密钥是 CodeBuddy 访问密钥(对应 env `CODEBUDDY_API_KEY`),用来直连内网模型网关 `copilot.tencent.com/v2/chat/completions`。框架的 `model/codebuddy` provider 就是把它同时放进 `Authorization: Bearer` 和 `x-api-key` 两个头、再加 `x-codebuddy-request: 1` 头打 HTTP 请求(端点/请求头/模型清单/踩坑见 `docs/notes/codebuddy-gateway.md`)。**严禁把 `ck_` 明文贴进对话、写进代码或提交到仓库**——它会进对话历史/transcript,可能被缓存或回放。统一走环境变量:
+
+> **不依赖 CodeBuddy CLI**:`ck_` 是网关的 bearer 凭据,认证走纯 HTTP,框架发请求不需要本地装 codebuddy CLI。已实测确认(2026-07-10):屏蔽掉全部 `codebuddy` 二进制(`type codebuddy` → not found)后,`model/codebuddy` provider 仍能正常向网关发请求、拿流式响应(glm-5.2 / minimax-m3 均通)。CLI 只是这个开发机上恰好存在的工具,不是网关请求的依赖。部署到其他环境只要有一把 `ck_` key + 能访问 `copilot.tencent.com` 的网络,直接 `go run` 即可。
 
 **key 的存放**:明文只存在 `~/.codebuddy.env`(`chmod 600`,在 home 不在仓库,勿提交),内容是一行 `export CODEBUDDY_API_KEY='ck_...'`,由用户自己用编辑器维护。`~/.bashrc` 和 `~/.zshrc` 末尾已各加一行 `[ -f ~/.codebuddy.env ] && set -a && . ~/.codebuddy.env && set +a` 来加载它。
 
@@ -187,7 +189,7 @@ CB_MODEL=claude-haiku-4.5 cb-chat "hi"
 
 **换 key 后的坑(重要)**:`~/.codebuddy.env` 更新后,若当前 shell 的 `CODEBUDDY_API_KEY` 环境变量仍残留**旧 key**(rc 已加载过),`cb-chat` 和 `model/codebuddy` provider 会优先用环境变量里的旧值、不重读文件。换 key 后若实测仍报 `14019`(额度耗尽),用 `env -u CODEBUDDY_API_KEY cb-chat -m glm-5.2 'hi'` 清掉旧环境变量强制读新文件验证;或重开 shell 让 rc 重新加载。框架跑 `go run` 时同理,可 `env -u CODEBUDDY_API_KEY go run .` 强制读新 key。
 
-**跑 Go demo / 测试**时,框架的 `model/codebuddy` provider 自己 `os.Getenv("CODEBUDDY_API_KEY")`,只要 rc 已加载 key,直接 `go run .` 即可,Claude 无需接触 key。
+**跑 Go demo / 测试**时,框架的 `model/codebuddy` provider 自己 `os.Getenv("CODEBUDDY_API_KEY")`,只要 rc 已加载 key,直接 `go run .` 即可,Claude 无需接触 key。CLI 不是必需的(见上"不依赖 CodeBuddy CLI")。
 
 **行为规范(Claude 必须遵守)**:绝不 `echo $CODEBUDDY_API_KEY` / `printenv` / `set -x` / `cat ~/.codebuddy.env` / `env | grep CODEBUDDY`——任何一种都会把明文泄露进 transcript。需要诊断网关问题时,只看 `cb-chat` 返回的 SSE 流或错误码(如 `11101`/`11102`/`14019`,含义见 `docs/notes/codebuddy-gateway.md` §4)。需要确认"key 是否已加载"时,用 `cb-chat 'hi'` 实发一次请求来验证,而非打印变量。
 
