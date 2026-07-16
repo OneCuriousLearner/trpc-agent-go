@@ -85,7 +85,8 @@ func WithSystemPrompt(prompt string) Option {
 // parent model request is available in the context. When enabled, the
 // summarizer clones the parent request and appends a compacting user message
 // instead of sending a standalone summary prompt. If no parent request is
-// available, summarization falls back to the standalone prompt path.
+// available, or the parent cannot fit the summary model's input budget,
+// summarization falls back to a bounded standalone prompt.
 //
 // This is disabled by default.
 func WithCacheSafeForking(enable bool) Option {
@@ -153,7 +154,7 @@ func WithSkipRecent(skipFunc SkipRecentFunc) Option {
 // If you call multiple threshold options (e.g. token + event), all must pass.
 func WithTokenThreshold(tokenCount int) Option {
 	return func(s *sessionSummarizer) {
-		s.checks = append(s.checks, CheckTokenThresholdContext(tokenCount))
+		s.checks = append(s.checks, evaluateTokenThreshold(tokenCount))
 	}
 }
 
@@ -162,16 +163,18 @@ func WithTokenThreshold(tokenCount int) Option {
 // If you call multiple threshold options (e.g. token + event), all must pass.
 func WithEventThreshold(eventCount int) Option {
 	return func(s *sessionSummarizer) {
-		s.checks = append(s.checks, wrapChecker(CheckEventThreshold(eventCount)))
+		s.checks = append(s.checks, evaluateEventThreshold(eventCount))
 	}
 }
 
-// WithTimeThreshold appends a time-based check.
+// WithTimeThreshold appends a time-based check. The built-in Runner path uses
+// the idle gap before the current top-level request; standalone evaluation
+// preserves CheckTimeThreshold's last-event-age fallback.
 // Note: all checks in a summarizer are combined with global AND semantics.
 // If you call multiple threshold options (e.g. event + time), all must pass.
 func WithTimeThreshold(interval time.Duration) Option {
 	return func(s *sessionSummarizer) {
-		s.checks = append(s.checks, wrapChecker(CheckTimeThreshold(interval)))
+		s.checks = append(s.checks, evaluateTimeThreshold(interval))
 	}
 }
 
@@ -198,7 +201,7 @@ func WithChecksAny(checks ...Checker) Option {
 func WithChecksAllContext(checks ...ContextChecker) Option {
 	return func(s *sessionSummarizer) {
 		if len(checks) > 0 {
-			s.checks = append(s.checks, allContextChecks(checks))
+			s.checks = append(s.checks, wrapContextChecker(allContextChecks(checks)))
 		}
 	}
 }
@@ -208,8 +211,16 @@ func WithChecksAllContext(checks ...ContextChecker) Option {
 func WithChecksAnyContext(checks ...ContextChecker) Option {
 	return func(s *sessionSummarizer) {
 		if len(checks) > 0 {
-			s.checks = append(s.checks, anyContextChecks(checks))
+			s.checks = append(s.checks, wrapContextChecker(anyContextChecks(checks)))
 		}
+	}
+}
+
+// WithReportHook observes summary trigger and model-call accounting after a
+// summary attempt finishes.
+func WithReportHook(h ReportHook) Option {
+	return func(s *sessionSummarizer) {
+		s.reportHook = h
 	}
 }
 
@@ -320,6 +331,6 @@ func WithContextThreshold(opts ...ContextThresholdOption) Option {
 				effectiveOpts = append(effectiveOpts, WithContextThresholdFallbackWindow(w))
 			}
 		}
-		s.checks = append(s.checks, CheckContextThreshold(effectiveOpts...))
+		s.checks = append(s.checks, evaluateContextThreshold(effectiveOpts...))
 	}
 }

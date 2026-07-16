@@ -72,6 +72,8 @@ type ServiceOpts struct {
 	// memory job fails. Lets callers observe background-extraction
 	// failures instead of finding them only as empty memories.
 	autoMemoryOnError imemory.AutoMemoryErrorHandler
+	// disableAutoMemoryOnExternalContext skips auto extraction for polluted sessions.
+	disableAutoMemoryOnExternalContext bool
 }
 
 func (o ServiceOpts) clone() ServiceOpts {
@@ -315,6 +317,14 @@ func WithMemoryJobTimeout(timeout time.Duration) ServiceOpt {
 func WithAutoMemoryOnError(handler imemory.AutoMemoryErrorHandler) ServiceOpt {
 	return func(opts *ServiceOpts) {
 		opts.autoMemoryOnError = handler
+	}
+}
+
+// WithDisableAutoMemoryOnExternalContext stops future automatic memory
+// extraction for sessions that consumed framework-owned external context.
+func WithDisableAutoMemoryOnExternalContext(disable bool) ServiceOpt {
+	return func(opts *ServiceOpts) {
+		opts.disableAutoMemoryOnExternalContext = disable
 	}
 }
 

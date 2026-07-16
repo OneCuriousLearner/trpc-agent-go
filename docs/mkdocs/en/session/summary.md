@@ -34,7 +34,7 @@ summarizer := summary.NewSummarizer(
     summary.WithChecksAny(
         summary.CheckEventThreshold(20),
         summary.CheckTokenThreshold(4000),
-        summary.CheckTimeThreshold(5*time.Minute), // Evaluated on summary check; compares the checked session's last event (normally the latest unsummarized event in delta flow)
+        summary.CheckTimeThreshold(5*time.Minute), // Runner path: trigger when the idle gap before the next request exceeds 5 minutes
     ),
     summary.WithMaxSummaryWords(200),
 )
@@ -141,12 +141,22 @@ After completing the above configuration, the summary feature runs automatically
 
 ## Cache-Safe Summary Forking
 
-By default, the summarizer sends a standalone summary request: an optional
-summary system prompt plus a user prompt containing the extracted conversation
-text. This is simple and remains the default behavior.
+The summarizer has two request-construction modes.
+
+**Standalone request** is the default. The framework selects the events that
+should be summarized, converts them to conversation text, runs the
+`WithPreSummaryHook(...)` hook if configured, and sends a summary-model request
+with:
+
+- An optional system message rendered from `WithSystemPrompt(...)`.
+- One user message rendered from `WithPrompt(...)`, with
+  `{conversation_text}` replaced by the extracted conversation text.
+
+This request is independent from the main agent request, so it is simple and
+works for synchronous, asynchronous, and manual summary calls.
 
 For long sessions where prompt-cache reuse matters, you can opt in to
-cache-safe forking:
+**cache-safe forking**:
 
 ```go
 summarizer := summary.NewSummarizer(
@@ -157,17 +167,83 @@ summarizer := summary.NewSummarizer(
 )
 ```
 
-When enabled and the framework has the parent model request available, the
-summarizer clones that parent request and appends one compacting user message
-at the end. This preserves the parent request prefix, including system context,
-history, and tools, so providers with prompt caching can reuse more cached
-input. If no parent request is available, for example in asynchronous or manual
-summary calls, the summarizer falls back to the default standalone request.
+When context compaction runs in the normal LLM flow, the framework has already
+built the parent `model.Request` for the current main-agent call. If
+`WithCacheSafeForking(true)` is enabled, the summarizer builds the summary
+request by:
 
-The appended compacting prompt is separate from `WithPrompt(...)` because it
-does not embed `{conversation_text}`; the parent request already contains the
-conversation. Use `WithCacheSafeForkPrompt(...)` only when you need to customize
-that appended user message.
+- Cloning that parent request, including its model-visible prefix such as
+  system context, injected summary, session history, user input, tool
+  definitions, headers, extra fields, and generation settings.
+- Appending one user message rendered from `WithCacheSafeForkPrompt(...)`.
+- Forcing the summary call to be non-streaming and clearing structured output,
+  because the summary call returns plain summary text.
+
+The request prefix remains the same as the parent request prefix, so providers
+with prompt caching can reuse more cached input. If no parent request is
+available, for example in manual or external summary calls, the summarizer
+falls back to the standalone request path.
+
+Before sending either form of request, the summarizer admits it against the
+summary model's effective input budget. The framework uses the smaller of the
+provider-specific input budget, when the model exposes one, and a conservative
+ceiling of 70% of the model context window. An oversized fork is reduced without
+mutating the parent request: unused tool schemas are removed first, older
+complete source rounds can be dropped while the latest round is protected, and
+large tool argument/result payloads are replaced as needed. If the fork still
+cannot fit, the summarizer rebuilds a bounded standalone request. This fallback
+truncates only `{conversation_text}` with head-and-tail preservation; the fixed
+system prompt and user-prompt template remain intact.
+
+Budget fitting and the fork-to-standalone decision happen before the
+`BeforeModel` callback. The callback therefore receives the actual request that
+will be sent. The framework counts the request again after the callback; if the
+callback makes it exceed the budget, the call fails explicitly instead of
+silently replacing the callback-modified request. If a provider still returns a
+context-length error, or a non-custom model call returns an empty summary, the
+summarizer makes one bounded standalone retry at half of the first attempt's
+input budget.
+
+One important branch-summary behavior: after `WithCacheSafeForking(true)` is
+enabled, a non-empty branch trigger may fork the current parent request for the
+branch summary, but it will not also run the cascaded full-session summary in
+that same summary pass. The framework skips that full-session target instead of
+falling back to a standalone full-session prompt or reusing the branch-scoped
+fork request. Trigger a full-session summary separately when you need an
+all-branch summary.
+
+Prompt rules:
+
+- `WithPrompt(...)` configures the standalone user prompt. It must include
+  `{conversation_text}`. If `WithMaxSummaryWords(...)` is configured,
+  `{max_summary_words}` must appear in either `WithPrompt(...)` or
+  `WithSystemPrompt(...)`.
+- `WithSystemPrompt(...)` configures the optional standalone system message. It
+  must not include `{conversation_text}`. It may include
+  `{max_summary_words}`.
+- `WithCacheSafeForkPrompt(...)` configures only the user message appended in
+  fork mode. It must not include `{conversation_text}` because the cloned parent
+  request already contains the conversation. It may include
+  `{max_summary_words}`.
+
+Keep the standalone prompt valid even when cache-safe forking is enabled,
+because fallback paths still use it. When writing a custom fork prompt, ask the
+model to summarize the conversation above for future continuation. It should
+preserve user goals, decisions, constraints, open tasks, tool results, and
+important facts. It should not call tools, answer the latest user request, or
+treat system and tool-use instructions as facts to summarize.
+
+`WithPreSummaryHook(...)` still runs before the summary model call. In
+standalone mode its modified text is rendered into `{conversation_text}`. In
+fork mode with a parent request available, that text is not embedded into the
+request because the conversation is already present in the cloned parent
+request; the hook remains useful for context updates, side effects, and
+fallback standalone calls.
+
+In fork mode, `WithPreSummaryHook(...)` text or event edits do not sanitize,
+redact, or filter the cloned parent request. If the hook is used for redaction
+or filtering before summarization, use standalone mode for that flow or ensure
+the parent `model.Request` has already been sanitized before it is cloned.
 
 Cache-safe forking controls the request used to generate the summary. To make
 the next normal conversation request more cache friendly after a summary exists,
@@ -382,7 +458,7 @@ the caller.
 | `WithEventThreshold(eventCount int)` | Trigger when event count since last summary exceeds threshold |
 | `WithTokenThreshold(tokenCount int)` | Trigger when token count since last summary exceeds threshold |
 | `WithContextThreshold(opts ...ContextThresholdOption)` | Trigger when token count since last summary exceeds a ratio of the current model's context window |
-| `WithTimeThreshold(interval time.Duration)` | Evaluated during summary checks; wraps `CheckTimeThreshold` and triggers when the checked session's last event is older than the interval |
+| `WithTimeThreshold(interval time.Duration)` | In the Runner path, triggers when the idle gap before the current top-level request exceeds the interval; standalone evaluation falls back to last-event age |
 
 Use `WithTokenThreshold` when you want a fixed application-defined token
 threshold, for example "summarize after 4000 new tokens" regardless of which
@@ -407,6 +483,47 @@ than** that threshold. If you set a very small ratio, for example `0.001`, and
 expect summarization around 1000 tokens, pass
 `summary.WithContextThresholdMinTokens(0)` explicitly, or set it to the
 application-specific minimum you want.
+
+### Trigger and Call Reporting
+
+Use `summary.WithReportHook` when you need to observe why summary generation
+was triggered and how large the summary model request was:
+
+```go
+summarizer := summary.NewSummarizer(
+    summaryModel,
+    summary.WithContextThreshold(),
+    summary.WithReportHook(func(ctx context.Context, report summary.Report) {
+        triggerTokens := report.Trigger.Value
+        summaryPromptTokens := report.Call.PromptTokens
+        _ = triggerTokens
+        _ = summaryPromptTokens
+    }),
+)
+```
+
+The report keeps two token counts separate:
+
+- `report.Trigger.Value`: the checker value that triggered summarization, such
+  as estimated delta tokens after the previous summary
+- `report.Call.EstimatedPromptTokens`: the framework's local estimate for the
+  complete summary model request
+- `report.Call.PromptTokens`: the provider-reported `usage.prompt_tokens` for
+  the summary model call
+
+For cache-safe forking, `report.Call.Mode` is `cache_safe_fork` and the request
+estimate is computed from the forked parent request plus the appended summary
+instruction. For standalone summary prompts, the mode is `standalone`. If a
+`BeforeModel` callback returns a custom response and no summary model request is
+sent, the mode is `custom_response` and the prompt estimate remains zero.
+
+Advanced integrations can attach a report before entering a higher-level
+summary flow with `summary.ContextWithReport(ctx, report)` and retrieve it with
+`summary.ReportFromContext(ctx)`. The framework reuses that report for a single
+summary path; when a cascade generates multiple summaries in parallel, each
+worker receives a cloned report so branch-specific writes do not race. Those
+forked reports are emitted through their per-call hooks and are not merged back
+into the root report.
 
 For private deployments, endpoint IDs, fine-tuned models, newly released
 models, or multi-tenant custom model configuration, prefer the instance or
@@ -592,7 +709,7 @@ type Checker func(sess *session.Session) bool
 | Checker | Description |
 | --- | --- |
 | `CheckEventThreshold(eventCount int)` | Returns true when the number of delta events since the last summary exceeds the threshold |
-| `CheckTimeThreshold(interval time.Duration)` | Returns true when the checked session's last event is older than the interval |
+| `CheckTimeThreshold(interval time.Duration)` | In the Runner summary path, checks the idle gap before the current top-level request; direct calls without a Runner observation retain the last-event-age fallback |
 | `CheckTokenThreshold(tokenCount int)` | Returns true when the estimated token count of delta events since the last summary exceeds the threshold (estimated via `TokenCounter` from extracted conversation text, not `event.Response.Usage.TotalTokens`) |
 | `ChecksAll(checks []Checker)` | Combines multiple Checkers; returns true only when all return true (AND) |
 | `ChecksAny(checks []Checker)` | Combines multiple Checkers; returns true when any returns true (OR) |
@@ -834,10 +951,10 @@ When `WithSyncSummaryIntraRun(true)` is enabled, the Flow synchronously calls `C
 - Event count exceeds threshold (`WithEventThreshold`)
 - Token count exceeds threshold (`WithTokenThreshold`)
 - Token count exceeds the configured ratio of the active model's context window (`WithContextThreshold`)
-- On a summary check, the checked session's last event is older than the interval (`WithTimeThreshold`)
+- The idle gap before the current top-level request exceeds the interval (`WithTimeThreshold` in the Runner path)
 - Custom combined conditions met (`WithChecksAny` / `WithChecksAll`)
 
-`WithTimeThreshold` is not a standalone background timer. The condition is only evaluated when a summary check runs, typically after a conversation turn completes or when you call summary APIs manually. It checks the last event of the session being evaluated; in the Runner's normal delta-summary flow, that session contains only pending events, so this effectively means the latest unsummarized event. For example, `5*time.Minute` means "on the next summary check, if the checked session's last event is already older than 5 minutes, summarize now."
+`WithTimeThreshold` is not a standalone background timer. In the automatic Runner path, the framework records when a top-level request arrives and compares that immutable time with the previous relevant event in the same summary scope. For example, `5*time.Minute` means "when the next top-level request arrives after more than five minutes of scoped inactivity, its summary check may trigger." Model latency and async worker queue time do not count toward the gap. Direct checker or summary API calls without a Runner request observation retain the legacy last-event-age behavior.
 
 ### Same-Run Sync Summary for Long ReAct Loops
 
@@ -982,8 +1099,8 @@ llmagent.WithAddSessionSummary(true)
 
 - Session summary is **merged into the existing system message** if one exists, or prepended as a new system message if none exists
 - This ensures compatibility with models that require a single system message at the beginning (e.g., Qwen3.5 series)
-- Includes **all incremental events** after the summary point (no truncation)
-- Guarantees complete context: compressed history + full new conversation
+- Includes **all incremental events** after the summary point. When a synchronous intra-run summary advances the boundary inside the current invocation, request rebuilding also preserves the current user message and the latest complete pre-boundary tool round as a bounded resume tail
+- Preserves semantic continuity through compressed history, post-boundary events, and the bounded current-invocation resume tail; older covered tool rounds are represented only by the summary
 - **`WithMaxHistoryRuns` parameter is ignored**
 
 #### Summary Injection Mode
@@ -1111,6 +1228,26 @@ When `WithEnableContextCompaction(true)` is enabled, the framework applies the f
 
 The passes have different roles: Pass 0 is an explicit tool-name policy; Pass 1 aggressively cleans old history (low threshold, full replacement); Pass 2 is a high-threshold guard that only kicks in for extreme cases and can also apply to the current request.
 
+Synchronous intra-run summary has one additional projection rule. If the new
+summary boundary covers events from the current invocation, the boundary is
+hard for ordinary covered history, but the rebuilt main-agent request keeps:
+
+1. The current invocation's user message.
+2. The latest complete tool round before the boundary, including all calls and
+   matching results in a parallel batch.
+3. All incremental events after the boundary.
+
+Only that latest complete pre-boundary round is restored; earlier covered tool
+rounds remain represented by the summary. This small resume tail prevents the
+main model from treating a completed tool step as missing and repeating a
+side-effecting call. When context compaction is enabled, each restored tool-call
+argument payload and each non-kept tool result is checked independently against
+`ContextCompactionToolResultMaxTokens`; only an item that exceeds the threshold
+is replaced with a protocol-preserving placeholder. When context compaction is
+disabled, the framework does not rewrite those payloads. If the boundary falls
+between a tool call and its result, the existing call/result pairing repair
+keeps the provider request valid without restoring unrelated covered history.
+
 Pass 2 is disabled by default (`0`). It only fires when both (1) `WithEnableContextCompaction(true)` is set and (2) `ContextCompactionOversizedToolResultMaxTokens > 0` (recommended opt-in value: `8192`, exposed as the constant `processor.DefaultContextCompactionOversizedToolResultMaxTokens`). This guarantees that `EnableContextCompaction=false` always means "the framework will not modify any tool result".
 
 Use `WithToolResultCompactionConfig(...)` when you need tool-name or recency policy:
@@ -1179,11 +1316,14 @@ large historical `tool result` payloads were replaced with placeholders.
 │ System Prompt                           │
 │ (merged with Session Summary)           │ ← System prompt + compressed history
 ├─────────────────────────────────────────┤
+│ User: current invocation message        │ ← Preserved across an intra-run cutoff
+├─────────────────────────────────────────┤
+│ Latest complete pre-cutoff tool round   │ ← At most one; oversized payloads may be placeholders
+├─────────────────────────────────────────┤
 │ Event 1 (after summary)                 │ ┐
-│ Event 2                                 │ │
-│ Event 3                                 │ │ New events after summary
-│ ...                                     │ │ (fully retained)
-│ Event N (current message)               │ ┘
+│ Event 2                                 │ │ Incremental events after summary
+│ ...                                     │ │ (subject to configured compaction/tailoring)
+│ Event N                                 │ ┘
 └─────────────────────────────────────────┘
 ```
 
@@ -1372,6 +1512,12 @@ Behavior notes:
   targets. It does not block `session.SummaryFilterKeyAllContents`.
 - `WithCascadeFullSessionSummary(...)` controls whether a non-empty branch
   trigger also refreshes the full-session summary.
+- With `WithCacheSafeForking(true)`, a branch-triggered summary pass only runs
+  the branch summary target when a parent fork request is available. The
+  full-session cascade target is skipped in that pass; it does not fall back to
+  the standalone full-session prompt and does not reuse the branch-scoped fork
+  request. Request a full-session summary separately when you need one for all
+  branches.
 - To keep only full-session summaries from branch-triggered automatic summary,
   pass an explicit empty allowlist and leave cascade enabled:
 
@@ -1460,7 +1606,7 @@ func main() {
         summary.WithChecksAny(
             summary.CheckEventThreshold(20),
             summary.CheckTokenThreshold(4000),
-            summary.CheckTimeThreshold(5*time.Minute), // Evaluated on summary check; compares the checked session's last event (normally the latest unsummarized event in delta flow)
+            summary.CheckTimeThreshold(5*time.Minute), // Runner path: trigger when the idle gap before the next request exceeds 5 minutes
         ),
     )
 

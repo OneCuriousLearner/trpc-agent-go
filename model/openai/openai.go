@@ -71,20 +71,24 @@ const (
 	VariantDeepSeek Variant = "deepseek"
 	// VariantQwen is the Qwen variant with specific base_url handling.
 	VariantQwen Variant = "qwen"
+	// VariantGLM is the GLM OpenAI-compatible variant. Some GLM gateways
+	// return the visible final answer in reasoning_content with empty content.
+	VariantGLM Variant = "glm"
 )
 
 // thinkingValueConvertor converts ThinkingEnabled bool to the variant-specific value.
 type thinkingValueConvertor func(enabled bool) any
+
+const thinkingKey = "thinking"
 
 // defaultThinkingValueConvertor returns the bool value as-is.
 var defaultThinkingValueConvertor = func(enabled bool) any {
 	return enabled
 }
 
-// deepSeekThinkingValueConvertor converts to the DeepSeek thinking-toggle
-// format introduced in v3.2 and reused by v4 (e.g. deepseek-v4-pro /
-// deepseek-v4-flash): {"type": "enabled"/"disabled"}.
-var deepSeekThinkingValueConvertor = func(enabled bool) any {
+// thinkingTypeValueConvertor converts to the nested thinking-toggle format
+// used by providers such as DeepSeek v3.2+, Hunyuan, and GLM.
+var thinkingTypeValueConvertor = func(enabled bool) any {
 	const (
 		thinkingTypeEnabled  = "enabled"
 		thinkingTypeDisabled = "disabled"
@@ -127,6 +131,9 @@ type variantConfig struct {
 	// defaultReasoningContentBackfill controls replay-time empty
 	// reasoning_content backfill for assistant messages.
 	defaultReasoningContentBackfill bool
+	// reasoningContentAsContentFallback copies reasoning_content into
+	// content only when content is empty and the response has no tool calls.
+	reasoningContentAsContentFallback bool
 }
 type fileDeletionBodyConvertor func(body []byte, fileID string) []byte
 
@@ -160,8 +167,8 @@ var variantConfigs = map[Variant]variantConfig{
 		defaultBaseURL:            defaultDeepSeekBaseURL,
 		// DeepSeek v3.2+ (incl. v4-pro / v4-flash) uses
 		// {"thinking": {"type": "enabled"/"disabled"}} format.
-		thinkingEnabledKey:              "thinking",
-		thinkingValueConvertor:          deepSeekThinkingValueConvertor,
+		thinkingEnabledKey:              thinkingKey,
+		thinkingValueConvertor:          thinkingTypeValueConvertor,
 		defaultReasoningContentBackfill: true,
 	},
 	VariantHunyuan: {
@@ -210,8 +217,10 @@ var variantConfigs = map[Variant]variantConfig{
 			r.ContentLength = int64(body.Len())
 			return r, nil
 		},
-		thinkingEnabledKey:     model.ThinkingEnabledKey,
-		thinkingValueConvertor: defaultThinkingValueConvertor,
+		// TokenHub Hunyuan thinking models use
+		// {"thinking": {"type": "enabled"/"disabled"}} format.
+		thinkingEnabledKey:     thinkingKey,
+		thinkingValueConvertor: thinkingTypeValueConvertor,
 	},
 	VariantQwen: {
 		fileUploadPath:            "/openapi/v1/files",
@@ -222,8 +231,18 @@ var variantConfigs = map[Variant]variantConfig{
 		apiKeyName:                qwenAPIKeyName,
 		defaultBaseURL:            defaultQwenBaseURL,
 		// refer:https://help.aliyun.com/zh/model-studio/deep-thinking
-		thinkingEnabledKey:     model.EnabledThinkingKey,
+		thinkingEnabledKey:     model.EnableThinkingKey,
 		thinkingValueConvertor: defaultThinkingValueConvertor,
+	},
+	VariantGLM: {
+		fileUploadPath:                    "/openapi/v1/files",
+		filePurpose:                       openai.FilePurposeUserData,
+		fileDeletionMethod:                http.MethodDelete,
+		skipFileTypeInContent:             false,
+		fileDeletionBodyConvertor:         defaultFileDeletionBodyConvertor,
+		thinkingEnabledKey:                thinkingKey,
+		thinkingValueConvertor:            thinkingTypeValueConvertor,
+		reasoningContentAsContentFallback: true,
 	},
 }
 
@@ -313,6 +332,10 @@ func New(name string, opts ...Option) *Model {
 	if o.TailoringStrategy == nil {
 		o.TailoringStrategy = model.NewMiddleOutStrategy(o.TokenCounter)
 	}
+	variantCfg := variantConfigs[o.Variant]
+	if o.textOnlyMessageContent != nil {
+		variantCfg.textOnlyMessageContent = *o.textOnlyMessageContent
+	}
 
 	return &Model{
 		client:                     client,
@@ -329,7 +352,7 @@ func New(name string, opts ...Option) *Model {
 		chatTelemetry:              o.ChatTelemetry,
 		extraFields:                o.ExtraFields,
 		variant:                    o.Variant,
-		variantConfig:              variantConfigs[o.Variant],
+		variantConfig:              variantCfg,
 		reasoningContentBackfill:   o.ReasoningContentBackfill,
 		batchCompletionWindow:      o.BatchCompletionWindow,
 		batchMetadata:              o.BatchMetadata,
@@ -568,62 +591,15 @@ func (m *Model) applyTokenTailoring(ctx context.Context, request *model.Request)
 		return
 	}
 
-	// Determine max input tokens using priority: user config > auto calculation > default.
-	maxInputTokens := m.maxInputTokens
-	outputReserveTokens := m.effectiveOutputReserveTokens(request)
-	contextWindow := m.contextWindow
-	if contextWindow <= 0 {
-		contextWindow = imodel.ResolveContextWindow(m.name)
-	}
-	autoBudget := maxInputTokens <= 0
-	if autoBudget {
-		// Auto-calculate based on model context window with custom or default parameters.
-		if m.protocolOverheadTokens > 0 || m.reserveOutputTokens > 0 {
-			// Use custom parameters if any are set.
-			maxInputTokens = imodel.CalculateMaxInputTokensWithParams(
-				contextWindow,
-				m.protocolOverheadTokens,
-				outputReserveTokens,
-				m.inputTokensFloor,
-				m.safetyMarginRatio,
-				m.maxInputTokensRatio,
-			)
-		} else {
-			// Use default parameters.
-			maxInputTokens = imodel.CalculateMaxInputTokensWithParams(
-				contextWindow,
-				imodel.DefaultProtocolOverheadTokens,
-				outputReserveTokens,
-				imodel.DefaultInputTokensFloor,
-				imodel.DefaultSafetyMarginRatio,
-				imodel.DefaultMaxInputTokensRatio,
-			)
-		}
-	}
-
-	maxInputTokens = min(maxInputTokens, m.hardInputBudget(contextWindow, outputReserveTokens))
-	if autoBudget {
+	maxInputTokens := m.InputTokenBudget(ctx, request)
+	if m.maxInputTokens <= 0 {
 		log.DebugfContext(
 			ctx,
 			"auto-calculated max input tokens: model=%s, "+
-				"contextWindow=%d, reserveOutputTokens=%d, maxInputTokens=%d",
+				"maxInputTokens=%d",
 			m.name,
-			contextWindow,
-			outputReserveTokens,
 			maxInputTokens,
 		)
-		toolsTokens := m.estimateToolsTokens(ctx, request.Tools)
-		if toolsTokens > 0 {
-			maxInputTokens = max(maxInputTokens-toolsTokens, 0)
-			log.DebugfContext(
-				ctx,
-				"adjusted max input tokens after tools budget: model=%s, "+
-					"toolsTokens=%d, maxInputTokens=%d",
-				m.name,
-				toolsTokens,
-				maxInputTokens,
-			)
-		}
 	}
 
 	// Apply token tailoring.
@@ -649,6 +625,54 @@ func (m *Model) applyTokenTailoring(ctx context.Context, request *model.Request)
 	modeltailoring.ApplyResult(ctx, "openai.Model", request, tailored)
 }
 
+// InputTokenBudget returns the same input budget used by token tailoring.
+func (m *Model) InputTokenBudget(ctx context.Context, request *model.Request) int {
+	maxInputTokens := m.maxInputTokens
+	outputReserveTokens := m.effectiveOutputReserveTokens(request)
+	contextWindow := m.contextWindow
+	if contextWindow <= 0 {
+		contextWindow = imodel.ResolveContextWindow(m.name)
+	}
+	autoBudget := maxInputTokens <= 0
+	if autoBudget {
+		if m.protocolOverheadTokens > 0 || m.reserveOutputTokens > 0 {
+			maxInputTokens = imodel.CalculateMaxInputTokensWithParams(
+				contextWindow,
+				m.protocolOverheadTokens,
+				outputReserveTokens,
+				m.inputTokensFloor,
+				m.safetyMarginRatio,
+				m.maxInputTokensRatio,
+			)
+		} else {
+			maxInputTokens = imodel.CalculateMaxInputTokensWithParams(
+				contextWindow,
+				imodel.DefaultProtocolOverheadTokens,
+				outputReserveTokens,
+				imodel.DefaultInputTokensFloor,
+				imodel.DefaultSafetyMarginRatio,
+				imodel.DefaultMaxInputTokensRatio,
+			)
+		}
+	}
+
+	maxInputTokens = min(
+		maxInputTokens,
+		m.hardInputBudget(contextWindow, outputReserveTokens),
+	)
+	if autoBudget {
+		var tools map[string]tool.Tool
+		if request != nil {
+			tools = request.Tools
+		}
+		maxInputTokens = max(
+			maxInputTokens-m.estimateToolsTokens(ctx, tools),
+			0,
+		)
+	}
+	return maxInputTokens
+}
+
 func (m *Model) effectiveOutputReserveTokens(request *model.Request) int {
 	reserve := m.reserveOutputTokens
 	if reserve <= 0 {
@@ -657,8 +681,10 @@ func (m *Model) effectiveOutputReserveTokens(request *model.Request) int {
 	if request == nil {
 		return reserve
 	}
-	if request.MaxTokens != nil && *request.MaxTokens > reserve {
-		reserve = *request.MaxTokens
+	if request.MaxTokens != nil {
+		if mt := imodel.ClampMaxTokensForModel(m.name, request.MaxTokens); mt != nil && *mt > reserve {
+			reserve = *mt
+		}
 	}
 	if request.ThinkingTokens != nil && *request.ThinkingTokens > reserve {
 		reserve = *request.ThinkingTokens
@@ -745,8 +771,8 @@ func (m *Model) buildChatRequest(request *model.Request) (*openai.ChatCompletion
 
 	// MaxTokens is deprecated and not compatible with o-series models.
 	// Use MaxCompletionTokens instead.
-	if request.MaxTokens != nil {
-		chatRequest.MaxCompletionTokens = openai.Int(int64(*request.MaxTokens))
+	if mt := imodel.ClampMaxTokensForModel(m.name, request.MaxTokens); mt != nil {
+		chatRequest.MaxCompletionTokens = openai.Int(int64(*mt))
 	}
 	if request.Temperature != nil {
 		chatRequest.Temperature = openai.Float(*request.Temperature)
@@ -1316,7 +1342,11 @@ func imageToURLOrBase64(image *model.Image) string {
 	if image.URL != "" {
 		return image.URL
 	}
-	return "data:image/" + image.Format + ";base64," + base64.StdEncoding.EncodeToString(image.Data)
+	format := image.Format
+	if strings.HasPrefix(format, "image/") {
+		return "data:" + format + ";base64," + base64.StdEncoding.EncodeToString(image.Data)
+	}
+	return "data:image/" + format + ";base64," + base64.StdEncoding.EncodeToString(image.Data)
 }
 
 func isProviderFileID(fileID string) bool {
@@ -2350,7 +2380,12 @@ func (m *Model) emitStreamingFinalResponse(
 					{
 						Index: 0,
 						Message: model.Message{
-							Role:             model.RoleAssistant,
+							Role: model.RoleAssistant,
+							Content: m.contentWithReasoningFallback(
+								"",
+								aggregatedReasoning,
+								false,
+							),
 							ReasoningContent: aggregatedReasoning,
 						},
 					},
@@ -2458,13 +2493,19 @@ func (m *Model) createFinalResponse(
 		if reasoningContent == "" && i == 0 && aggregatedReasoning != "" {
 			reasoningContent = aggregatedReasoning
 		}
+		choiceHasToolCalls := hasToolCall && i == 0
+		content := m.contentWithReasoningFallback(
+			choice.Message.Content,
+			reasoningContent,
+			choiceHasToolCalls,
+		)
 
 		finalResponse.Choices[i] = model.Choice{
 			Index:    int(choice.Index),
 			Logprobs: convertChatCompletionChoiceLogprobs(choice.Logprobs),
 			Message: model.Message{
 				Role:             model.RoleAssistant,
-				Content:          choice.Message.Content,
+				Content:          content,
 				ReasoningContent: reasoningContent,
 			},
 		}
@@ -2542,13 +2583,18 @@ func (m *Model) createResponseFromCompletion(chatCompletion *openai.ChatCompleti
 		for i, choice := range chatCompletion.Choices {
 			// Extract reasoning content from the message if available.
 			reasoningContent := extractReasoningContent(choice.Message.JSON.ExtraFields)
+			content := m.contentWithReasoningFallback(
+				choice.Message.Content,
+				reasoningContent,
+				len(choice.Message.ToolCalls) > 0,
+			)
 
 			response.Choices[i] = model.Choice{
 				Index:    int(choice.Index),
 				Logprobs: convertChatCompletionChoiceLogprobs(choice.Logprobs),
 				Message: model.Message{
 					Role:             model.RoleAssistant,
-					Content:          choice.Message.Content,
+					Content:          content,
 					ReasoningContent: reasoningContent,
 				},
 			}
@@ -2595,6 +2641,20 @@ func (m *Model) createResponseFromCompletion(chatCompletion *openai.ChatCompleti
 	}
 
 	return response
+}
+
+func (m *Model) contentWithReasoningFallback(
+	content string,
+	reasoningContent string,
+	hasToolCall bool,
+) string {
+	if content != "" || reasoningContent == "" || hasToolCall {
+		return content
+	}
+	if m == nil || !m.variantConfig.reasoningContentAsContentFallback {
+		return content
+	}
+	return reasoningContent
 }
 
 func convertChatCompletionChoiceLogprobs(

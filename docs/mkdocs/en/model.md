@@ -1194,7 +1194,11 @@ The OpenAI SDK automatically retries the following errors:
 - **500+ Server Errors**: Internal server errors (5xx)
 - **Network Connection Errors**: No response or connection failure
 
-**Note**: SDK default maximum retry count is 2.
+**Note**: The SDK default maximum retry count is 2. This means the initial
+request can be retried up to 2 times, for a default maximum of 3 HTTP request
+attempts per call. The `n` in `openaiopt.WithMaxRetries(n)` is the retry count,
+not the total request count. Set it to `0` to disable SDK automatic retries and
+send only the initial request.
 
 ##### Retry Strategies
 
@@ -1234,6 +1238,18 @@ llm := openai.New("gpt-4o-mini",
 )
 ```
 
+**Disable Retry**:
+
+```go
+// For scenarios that must disable SDK automatic retries.
+llm := openai.New("gpt-4o-mini",
+    openai.WithOpenAIOptions(
+        openaiopt.WithMaxRetries(0),  // No retries; send one request only.
+        openaiopt.WithRequestTimeout(10*time.Second),
+    ),
+)
+```
+
 ##### How It Works
 
 Retry mechanism execution flow:
@@ -1266,6 +1282,7 @@ Key design:
 - **No Framework Retry**: Framework itself does not implement retry logic
 - **Client-level Retry**: All retry is handled by OpenAI client
 - **Configuration Pass-through**: Use `WithOpenAIOptions` to configure retry behavior
+- **Disable Retry**: Set `openaiopt.WithMaxRetries(0)` to disable SDK automatic retries
 - **Automatic Handling**: Rate limiting (429) is automatically handled without additional code
 
 ##### Usage Example
@@ -1786,7 +1803,7 @@ model := anthropic.New("claude-sonnet-4-0",
 
 #### 7. Variant Optimization: Adapting to Platform-Specific Behaviors
 
-The Variant mechanism is an important optimization in the Model module, used to handle platform-specific behavioral differences across OpenAI-compatible providers. By specifying different Variants, the framework can automatically adapt to API differences between platforms, especially for file upload, deletion, and processing logic.
+The Variant mechanism is an important optimization in the Model module, used to handle platform-specific behavioral differences across OpenAI-compatible providers. By specifying different Variants, the framework can automatically adapt to API differences between platforms, including file handling and thinking-toggle serialization.
 
 ##### 7.1. Supported Variant Types
 
@@ -1820,6 +1837,12 @@ The framework currently supports the following Variants:
 - Default BaseURL：`https://dashscope.aliyuncs.com/compatible-mode/v1`
 - API Key environment variable name：`DASHSCOPE_API_KEY`
 - Other behaviors are consistent with standard OpenAI
+
+**5. VariantGLM**
+
+- GLM OpenAI-compatible API adaptation
+- Serializes the thinking toggle using GLM's `thinking` object format
+- Falls back to exposing `reasoning_content` as visible content when some GLM gateways return an empty `content` field without tool calls
 
 ##### 7.2. Usage
 
@@ -1882,6 +1905,49 @@ model := openai.New("deepseek-v4-flash",
     openai.WithVariant(openai.VariantDeepSeek), // Automatically reads DEEPSEEK_API_KEY
 )
 ```
+
+##### 7.4. Thinking Toggles and Variants
+
+`Variant` and `GenerationConfig.ThinkingEnabled` have different responsibilities:
+
+- `WithVariant(...)` selects the provider protocol and determines which field and JSON shape represent the thinking toggle.
+- `ThinkingEnabled` explicitly enables or disables thinking.
+
+Setting only a `Variant` **does not emit a thinking toggle**. When `ThinkingEnabled == nil`, the framework omits the toggle and lets the provider apply its default. Even if a provider currently enables thinking by default, callers that require deterministic behavior should set `ThinkingEnabled` explicitly.
+
+The OpenAI-compatible variants serialize `ThinkingEnabled=true` as follows:
+
+| Variant | Request field for `ThinkingEnabled=true` |
+| --- | --- |
+| `VariantOpenAI` | `"thinking_enabled": true` |
+| `VariantDeepSeek` | `"thinking": {"type": "enabled"}` |
+| `VariantHunyuan` | `"thinking": {"type": "enabled"}` |
+| `VariantGLM` | `"thinking": {"type": "enabled"}` |
+| `VariantQwen` | `"enable_thinking": true` |
+
+For example, to deterministically enable thinking through the official DeepSeek API:
+
+```go
+thinking := true
+
+llm := openai.New("deepseek-v4-flash",
+    openai.WithBaseURL("https://api.deepseek.com"),
+    openai.WithAPIKey("your-api-key"),
+    openai.WithVariant(openai.VariantDeepSeek),
+)
+
+request := &model.Request{
+    Messages: []model.Message{
+        model.NewUserMessage("Analyze this problem."),
+    },
+    GenerationConfig: model.GenerationConfig{
+        Stream:          true,
+        ThinkingEnabled: &thinking,
+    },
+}
+```
+
+`ThinkingEnabled` applies only to models that expose an explicit thinking toggle; use `ReasoningEffort` instead when a model exposes only a reasoning budget. For external services that implement one of the thinking-toggle formats above, explicitly setting the matching `Variant` and `ThinkingEnabled` is usually sufficient. If a gateway uses a different field or requires additional parameters, use `openai.WithExtraFields(...)` to add or override provider-specific fields.
 
 #### 8. Streaming Tool Call Deltas: ShowToolCallDelta
 

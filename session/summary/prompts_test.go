@@ -118,7 +118,7 @@ func TestWithDetailedContinuityPrompt_RendersWithoutError(t *testing.T) {
 		WithMaxSummaryWords(100),
 	).(*sessionSummarizer)
 
-	req, err := s.buildSummaryRequest(t.Context(), "user said this, assistant did that")
+	req, _, err := s.buildSummaryRequest(t.Context(), "user said this, assistant did that")
 	require.NoError(t, err)
 	require.NotNil(t, req)
 	require.NotEmpty(t, req.Messages)

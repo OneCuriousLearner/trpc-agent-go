@@ -20,6 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"trpc.group/trpc-go/trpc-agent-go/event"
+	"trpc.group/trpc-go/trpc-agent-go/internal/summarytrigger"
 	"trpc.group/trpc-go/trpc-agent-go/model"
 	"trpc.group/trpc-go/trpc-agent-go/session"
 	isummaryscope "trpc.group/trpc-go/trpc-agent-go/session/internal/summaryscope"
@@ -81,6 +82,201 @@ func TestSummarizeSession_UsesLastIncludedTimestamp(t *testing.T) {
 	sess.SummariesMu.RUnlock()
 	require.NotNil(t, sum)
 	assert.True(t, sum.UpdatedAt.Equal(t2.UTC()))
+}
+
+func TestAttachRequestGapObservation(t *testing.T) {
+	t0 := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	start := summarytrigger.RequestStart{
+		RequestID: "req-2",
+		StartedAt: t0.Add(30 * time.Second),
+	}
+	ctx := summarytrigger.ContextWithRequestStart(context.Background(), start)
+	base := &session.Session{Events: []event.Event{
+		{
+			RequestID: "req-1",
+			Timestamp: t0,
+			FilterKey: "app/branch",
+			Version:   event.CurrentVersion,
+		},
+		{
+			RequestID: "req-2",
+			Timestamp: t0.Add(31 * time.Second),
+			FilterKey: "app/branch",
+			Version:   event.CurrentVersion,
+		},
+	}}
+
+	t.Run("attaches scoped observation without mutating base", func(t *testing.T) {
+		checkSess := &session.Session{}
+		isummaryscope.SetScopeFilterKey(checkSess, "app/branch")
+
+		attachRequestGapObservation(ctx, base, checkSess, nil)
+
+		got, ok := summarytrigger.ObservationFromSession(checkSess)
+		require.True(t, ok)
+		assert.True(t, got.Available)
+		assert.Equal(t, 30*time.Second, got.Elapsed)
+		_, ok = summarytrigger.ObservationFromSession(base)
+		assert.False(t, ok)
+	})
+
+	t.Run("boundary covering current request consumes observation", func(t *testing.T) {
+		checkSess := &session.Session{}
+		isummaryscope.SetScopeFilterKey(checkSess, "app/branch")
+
+		attachRequestGapObservation(
+			ctx,
+			base,
+			checkSess,
+			session.NewSummaryBoundary("app/branch", start.StartedAt),
+		)
+
+		got, ok := summarytrigger.ObservationFromSession(checkSess)
+		require.True(t, ok)
+		assert.False(t, got.Available)
+		assert.Zero(t, got.Elapsed)
+	})
+
+	t.Run("missing request context preserves standalone fallback", func(t *testing.T) {
+		checkSess := &session.Session{}
+		attachRequestGapObservation(
+			context.Background(),
+			base,
+			checkSess,
+			nil,
+		)
+
+		_, ok := summarytrigger.ObservationFromSession(checkSess)
+		assert.False(t, ok)
+	})
+}
+
+func TestSummarizeSession_RequestGapTriggersLegacyChecksAny(t *testing.T) {
+	t0 := time.Date(2026, 7, 15, 10, 0, 0, 0, time.UTC)
+	newSession := func(requestStartedAt time.Time) *session.Session {
+		return &session.Session{
+			ID:      "request-gap",
+			AppName: "app",
+			Events: []event.Event{
+				{
+					ID:        "req-1-assistant",
+					RequestID: "req-1",
+					Timestamp: t0,
+					Response: &model.Response{Choices: []model.Choice{{
+						Message: model.Message{
+							Role:    model.RoleAssistant,
+							Content: "previous response",
+						},
+					}}},
+				},
+				{
+					ID:        "req-2-user",
+					RequestID: "req-2",
+					Timestamp: requestStartedAt.Add(time.Second),
+					Response: &model.Response{Choices: []model.Choice{{
+						Message: model.Message{
+							Role:    model.RoleUser,
+							Content: "next request",
+						},
+					}}},
+				},
+				{
+					ID:        "req-2-assistant",
+					RequestID: "req-2",
+					Timestamp: requestStartedAt.Add(2 * time.Second),
+					Response: &model.Response{Choices: []model.Choice{{
+						Message: model.Message{
+							Role:    model.RoleAssistant,
+							Content: "next response",
+						},
+					}}},
+				},
+			},
+		}
+	}
+	summarizer := summary.NewSummarizer(
+		&reportModel{},
+		summary.WithChecksAny(
+			summary.CheckEventThreshold(100),
+			summary.CheckTimeThreshold(20*time.Second),
+		),
+	)
+
+	t.Run("fires when request gap exceeds threshold", func(t *testing.T) {
+		requestStartedAt := t0.Add(30 * time.Second)
+		ctx := summarytrigger.ContextWithRequestStart(
+			context.Background(),
+			summarytrigger.RequestStart{
+				RequestID: "req-2",
+				StartedAt: requestStartedAt,
+			},
+		)
+
+		updated, err := SummarizeSession(
+			ctx,
+			summarizer,
+			newSession(requestStartedAt),
+			"",
+			false,
+		)
+		require.NoError(t, err)
+		assert.True(t, updated)
+	})
+
+	t.Run("does not fire when request gap is below threshold", func(t *testing.T) {
+		requestStartedAt := t0.Add(10 * time.Second)
+		ctx := summarytrigger.ContextWithRequestStart(
+			context.Background(),
+			summarytrigger.RequestStart{
+				RequestID: "req-2",
+				StartedAt: requestStartedAt,
+			},
+		)
+
+		updated, err := SummarizeSession(
+			ctx,
+			summarizer,
+			newSession(requestStartedAt),
+			"",
+			false,
+		)
+		require.NoError(t, err)
+		assert.False(t, updated)
+	})
+
+	t.Run("does not consume the same gap twice", func(t *testing.T) {
+		requestStartedAt := t0.Add(30 * time.Second)
+		ctx := summarytrigger.ContextWithRequestStart(
+			context.Background(),
+			summarytrigger.RequestStart{
+				RequestID: "req-2",
+				StartedAt: requestStartedAt,
+			},
+		)
+		sess := newSession(requestStartedAt)
+
+		updated, err := SummarizeSession(ctx, summarizer, sess, "", false)
+		require.NoError(t, err)
+		require.True(t, updated)
+
+		sess.EventMu.Lock()
+		sess.Events = append(sess.Events, event.Event{
+			ID:        "req-2-final",
+			RequestID: "req-2",
+			Timestamp: requestStartedAt.Add(3 * time.Second),
+			Response: &model.Response{Choices: []model.Choice{{
+				Message: model.Message{
+					Role:    model.RoleAssistant,
+					Content: "final response",
+				},
+			}}},
+		})
+		sess.EventMu.Unlock()
+
+		updated, err = SummarizeSession(ctx, summarizer, sess, "", false)
+		require.NoError(t, err)
+		assert.False(t, updated)
+	})
 }
 
 func TestSummarizeSession_WritesSummaryBoundary(t *testing.T) {
@@ -246,6 +442,27 @@ func (f *fakeSummarizer) SetPrompt(prompt string)  {}
 func (f *fakeSummarizer) SetModel(m model.Model)   {}
 func (f *fakeSummarizer) Metadata() map[string]any { return map[string]any{} }
 
+type reportModel struct{}
+
+func (m *reportModel) Info() model.Info {
+	return model.Info{Name: "report"}
+}
+
+func (m *reportModel) GenerateContent(
+	context.Context,
+	*model.Request,
+) (<-chan *model.Response, error) {
+	ch := make(chan *model.Response, 1)
+	ch <- &model.Response{
+		Done: true,
+		Choices: []model.Choice{{
+			Message: model.Message{Content: "sum"},
+		}},
+	}
+	close(ch)
+	return ch, nil
+}
+
 type blockingSummarizer struct {
 	mu      sync.Mutex
 	calls   int
@@ -383,6 +600,83 @@ func TestSummarizeSession_FilteredKey_RespectsDeltaAndShould(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, updated)
 	require.Equal(t, "sum", base.Summaries["b1"].Summary)
+}
+
+func TestSummarizeSession_ForceReportIncludesFilterKey(t *testing.T) {
+	var got summary.Report
+	summarizer := summary.NewSummarizer(
+		&reportModel{},
+		summary.WithReportHook(func(_ context.Context, report summary.Report) {
+			got = report
+		}),
+	)
+	base := &session.Session{ID: "s1", AppName: "a", UserID: "u"}
+	base.Events = []event.Event{
+		makeEvent("new", time.Now(), "branch"),
+	}
+
+	updated, err := SummarizeSession(
+		context.Background(),
+		summarizer,
+		base,
+		"branch",
+		true,
+	)
+	require.NoError(t, err)
+	require.True(t, updated)
+	require.True(t, got.Trigger.Fired)
+	require.Equal(t, "force", got.Trigger.Name)
+	require.Equal(t, "branch", got.Trigger.FilterKey)
+}
+
+func TestCreateSessionSummaryWithCascade_ForceFullReportUsesTriggerFilterKey(t *testing.T) {
+	const branch = "app/branch"
+	var got summary.Report
+	summarizer := summary.NewSummarizer(
+		&reportModel{},
+		summary.WithReportHook(func(_ context.Context, report summary.Report) {
+			got = report
+		}),
+	)
+	base := &session.Session{ID: "s1", AppName: "a", UserID: "u"}
+	base.Events = []event.Event{
+		makeEvent("new", time.Now(), branch),
+		makeEvent("other", time.Now(), "app/other"),
+	}
+
+	err := CreateSessionSummaryWithCascade(
+		context.Background(),
+		base,
+		branch,
+		true,
+		NewSummaryDispatchPolicy([]string{session.SummaryFilterKeyAllContents}, true),
+		func(ctx context.Context, sess *session.Session, filterKey string, force bool) error {
+			_, err := SummarizeSession(ctx, summarizer, sess, filterKey, force)
+			return err
+		},
+	)
+	require.NoError(t, err)
+	require.True(t, got.Trigger.Fired)
+	require.Equal(t, "force", got.Trigger.Name)
+	require.Equal(t, branch, got.Trigger.FilterKey)
+}
+
+func TestSummarizeSession_ReusesCallerReport(t *testing.T) {
+	summarizer := summary.NewSummarizer(&reportModel{})
+	base := &session.Session{ID: "s1", AppName: "a", UserID: "u"}
+	base.Events = []event.Event{
+		makeEvent("new", time.Now(), "branch"),
+	}
+	report := &summary.Report{}
+	ctx := summary.ContextWithReport(context.Background(), report)
+
+	updated, err := SummarizeSession(ctx, summarizer, base, "branch", true)
+	require.NoError(t, err)
+	require.True(t, updated)
+	require.True(t, report.Trigger.Fired)
+	require.Equal(t, "force", report.Trigger.Name)
+	require.Equal(t, "branch", report.Trigger.FilterKey)
+	require.Equal(t, "standalone", report.Call.Mode)
 }
 
 func TestSummarizeSession_FullSession_SingleWrite(t *testing.T) {
@@ -1476,6 +1770,245 @@ func TestCreateSessionSummaryWithCascade_MethodValue(t *testing.T) {
 	defer mockSvc.mu.Unlock()
 	require.Equal(t, "summary-user-messages", mockSvc.summaries["user-messages"])
 	require.Equal(t, "summary-", mockSvc.summaries[""])
+}
+
+func TestCreateSessionSummaryWithCascade_ForksReportForParallelTargets(t *testing.T) {
+	now := time.Now()
+	sess := &session.Session{
+		ID:      "test-session",
+		AppName: "test-app",
+		UserID:  "test-user",
+		Events: []event.Event{
+			makeEvent("e1", now.Add(-2*time.Minute), "user-messages"),
+			makeEvent("e2", now.Add(-time.Minute), "tool-calls"),
+		},
+	}
+	rootReport := &summary.Report{}
+	ctx := summary.ContextWithReport(context.Background(), rootReport)
+
+	var (
+		reportsMu sync.Mutex
+		reports   []*summary.Report
+	)
+	err := CreateSessionSummaryWithCascade(
+		ctx,
+		sess,
+		"user-messages",
+		false,
+		NewSummaryDispatchPolicy(nil, true),
+		func(ctx context.Context, _ *session.Session, _ string, _ bool) error {
+			report, ok := summary.ReportFromContext(ctx)
+			if !ok {
+				return errors.New("missing report")
+			}
+			reportsMu.Lock()
+			reports = append(reports, report)
+			reportsMu.Unlock()
+			return nil
+		},
+	)
+	require.NoError(t, err)
+	require.Len(t, reports, 2)
+	require.NotSame(t, rootReport, reports[0])
+	require.NotSame(t, rootReport, reports[1])
+	require.NotSame(t, reports[0], reports[1])
+}
+
+func TestCreateSessionSummaryWithCascade_SkipsFullTargetForCacheSafeFork(t *testing.T) {
+	now := time.Now()
+	sess := &session.Session{
+		ID:      "test-session",
+		AppName: "test-app",
+		UserID:  "test-user",
+		Events: []event.Event{
+			makeEvent("branch", now.Add(-2*time.Minute), "user-messages"),
+			makeEvent("other", now.Add(-time.Minute), "tool-calls"),
+		},
+	}
+	parent := &model.Request{
+		Messages: []model.Message{model.NewUserMessage("parent request")},
+	}
+	ctx := summary.ContextWithCacheSafeForkRequest(context.Background(), parent)
+
+	summarizer := summary.NewSummarizer(
+		&reportModel{},
+		summary.WithCacheSafeForking(true),
+	)
+	err := CreateSessionSummaryWithCascade(
+		ctx,
+		sess,
+		"user-messages",
+		false,
+		NewSummaryDispatchPolicy(nil, true),
+		func(ctx context.Context, _ *session.Session, filterKey string, _ bool) error {
+			_, err := SummarizeSession(ctx, summarizer, sess, filterKey, false)
+			return err
+		},
+	)
+	require.NoError(t, err)
+
+	sess.SummariesMu.RLock()
+	defer sess.SummariesMu.RUnlock()
+	require.NotNil(t, sess.Summaries["user-messages"])
+	require.Nil(t, sess.Summaries[session.SummaryFilterKeyAllContents])
+}
+
+func TestCreateSessionSummaryWithCascade_SkipsForcedFullTargetForCacheSafeFork(t *testing.T) {
+	now := time.Now()
+	sess := &session.Session{
+		ID:      "test-session",
+		AppName: "test-app",
+		UserID:  "test-user",
+		Events: []event.Event{
+			makeEvent("branch", now.Add(-2*time.Minute), "user-messages"),
+			makeEvent("other", now.Add(-time.Minute), "tool-calls"),
+		},
+	}
+	parent := &model.Request{
+		Messages: []model.Message{model.NewUserMessage("parent request")},
+	}
+	ctx := summary.ContextWithCacheSafeForkRequest(context.Background(), parent)
+
+	summarizer := summary.NewSummarizer(
+		&reportModel{},
+		summary.WithCacheSafeForking(true),
+	)
+	err := CreateSessionSummaryWithCascade(
+		ctx,
+		sess,
+		"user-messages",
+		true,
+		NewSummaryDispatchPolicy(nil, true),
+		func(ctx context.Context, _ *session.Session, filterKey string, force bool) error {
+			_, err := SummarizeSession(ctx, summarizer, sess, filterKey, force)
+			return err
+		},
+	)
+	require.NoError(t, err)
+
+	sess.SummariesMu.RLock()
+	defer sess.SummariesMu.RUnlock()
+	require.NotNil(t, sess.Summaries["user-messages"])
+	require.Nil(t, sess.Summaries[session.SummaryFilterKeyAllContents])
+}
+
+func TestCreateSessionSummaryWithCascade_SkipsFullTargetForDynamicCacheSafeFork(t *testing.T) {
+	now := time.Now()
+	sess := &session.Session{
+		ID:      "test-session",
+		AppName: "test-app",
+		UserID:  "test-user",
+		Events: []event.Event{
+			makeEvent("branch", now.Add(-2*time.Minute), "user-messages"),
+			makeEvent("other", now.Add(-time.Minute), "tool-calls"),
+		},
+	}
+	parent := &model.Request{
+		Messages: []model.Message{model.NewUserMessage("parent request")},
+	}
+	ctx := summary.ContextWithCacheSafeForkRequest(context.Background(), parent)
+	resolved := summary.NewSummarizer(
+		&reportModel{},
+		summary.WithCacheSafeForking(true),
+	)
+	summarizer := summary.NewDynamicSummarizer(
+		func(context.Context, *session.Session) (summary.SessionSummarizer, error) {
+			return resolved, nil
+		},
+	)
+
+	err := CreateSessionSummaryWithCascade(
+		ctx,
+		sess,
+		"user-messages",
+		false,
+		NewSummaryDispatchPolicy(nil, true),
+		func(ctx context.Context, _ *session.Session, filterKey string, _ bool) error {
+			_, err := SummarizeSession(ctx, summarizer, sess, filterKey, false)
+			return err
+		},
+	)
+	require.NoError(t, err)
+
+	sess.SummariesMu.RLock()
+	defer sess.SummariesMu.RUnlock()
+	require.NotNil(t, sess.Summaries["user-messages"])
+	require.Nil(t, sess.Summaries[session.SummaryFilterKeyAllContents])
+}
+
+func TestCreateSessionSummaryWithCascade_PreservesFullOnlyTargetForCacheSafeFork(t *testing.T) {
+	now := time.Now()
+	sess := &session.Session{
+		ID:      "test-session",
+		AppName: "test-app",
+		UserID:  "test-user",
+		Events: []event.Event{
+			makeEvent("branch", now.Add(-2*time.Minute), "user-messages"),
+			makeEvent("other", now.Add(-time.Minute), "tool-calls"),
+		},
+	}
+	parent := &model.Request{
+		Messages: []model.Message{model.NewUserMessage("parent request")},
+	}
+	ctx := summary.ContextWithCacheSafeForkRequest(context.Background(), parent)
+
+	summarizer := summary.NewSummarizer(
+		&reportModel{},
+		summary.WithCacheSafeForking(true),
+	)
+	err := CreateSessionSummaryWithCascade(
+		ctx,
+		sess,
+		"user-messages",
+		false,
+		NewSummaryDispatchPolicy([]string{}, true),
+		func(ctx context.Context, _ *session.Session, filterKey string, _ bool) error {
+			_, err := SummarizeSession(ctx, summarizer, sess, filterKey, false)
+			return err
+		},
+	)
+	require.NoError(t, err)
+
+	sess.SummariesMu.RLock()
+	defer sess.SummariesMu.RUnlock()
+	require.Nil(t, sess.Summaries["user-messages"])
+	require.NotNil(t, sess.Summaries[session.SummaryFilterKeyAllContents])
+}
+
+func TestCreateSessionSummaryWithCascade_PreservesFullTargetWithoutCacheSafeFork(t *testing.T) {
+	now := time.Now()
+	sess := &session.Session{
+		ID:      "test-session",
+		AppName: "test-app",
+		UserID:  "test-user",
+		Events: []event.Event{
+			makeEvent("branch", now.Add(-2*time.Minute), "user-messages"),
+			makeEvent("other", now.Add(-time.Minute), "tool-calls"),
+		},
+	}
+	parent := &model.Request{
+		Messages: []model.Message{model.NewUserMessage("parent request")},
+	}
+	ctx := summary.ContextWithCacheSafeForkRequest(context.Background(), parent)
+
+	summarizer := summary.NewSummarizer(&reportModel{})
+	err := CreateSessionSummaryWithCascade(
+		ctx,
+		sess,
+		"user-messages",
+		false,
+		NewSummaryDispatchPolicy(nil, true),
+		func(ctx context.Context, _ *session.Session, filterKey string, _ bool) error {
+			_, err := SummarizeSession(ctx, summarizer, sess, filterKey, false)
+			return err
+		},
+	)
+	require.NoError(t, err)
+
+	sess.SummariesMu.RLock()
+	defer sess.SummariesMu.RUnlock()
+	require.NotNil(t, sess.Summaries["user-messages"])
+	require.NotNil(t, sess.Summaries[session.SummaryFilterKeyAllContents])
 }
 
 func TestCreateSessionSummaryWithCascade_FullTargetUsesTriggerFilterKeyForChecks(t *testing.T) {

@@ -147,6 +147,9 @@ type options struct {
 	// This can be useful when a provider rejects file inputs in chat messages,
 	// while still keeping the file parts in-memory for downstream tools.
 	OmitFileContentParts bool
+
+	// textOnlyMessageContent overrides the variant default when set.
+	textOnlyMessageContent *bool
 }
 
 var (
@@ -337,6 +340,14 @@ func WithVariant(variant Variant) Option {
 func WithOmitFileContentParts(omit bool) Option {
 	return func(opts *options) {
 		opts.OmitFileContentParts = omit
+	}
+}
+
+// WithTextOnlyMessageContent controls whether user message content parts are
+// reduced to text-only payloads before sending them to the provider.
+func WithTextOnlyMessageContent(enabled bool) Option {
+	return func(opts *options) {
+		opts.textOnlyMessageContent = &enabled
 	}
 }
 

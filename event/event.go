@@ -67,6 +67,9 @@ const (
 	// TriggerTypeTransfer indicates the child invocation was created because
 	// the parent agent invoked the transfer_to_agent tool (handoff pattern).
 	TriggerTypeTransfer = "transfer"
+	// TriggerTypeDynamicWorkflow indicates the child invocation was created by
+	// one dynamic workflow script calling a registered child agent.
+	TriggerTypeDynamicWorkflow = "dynamic_workflow"
 )
 
 // ParentInvocationMetadata describes how a child invocation was triggered by
@@ -248,6 +251,9 @@ func cloneExecutionTrace(executionTrace *trace.Trace) *trace.Trace {
 		StartedAt:        executionTrace.StartedAt,
 		EndedAt:          executionTrace.EndedAt,
 		Status:           executionTrace.Status,
+		Input:            cloneExecutionTraceSnapshot(executionTrace.Input),
+		Output:           cloneExecutionTraceSnapshot(executionTrace.Output),
+		Usage:            cloneUsage(executionTrace.Usage),
 		Steps:            make([]trace.Step, 0, len(executionTrace.Steps)),
 	}
 	for _, step := range executionTrace.Steps {
@@ -267,6 +273,7 @@ func cloneExecutionTraceStep(step trace.Step) trace.Step {
 		AgentName:          step.AgentName,
 		Branch:             step.Branch,
 		NodeID:             step.NodeID,
+		NodeType:           step.NodeType,
 		StartedAt:          step.StartedAt,
 		EndedAt:            step.EndedAt,
 		PredecessorStepIDs: append(
@@ -276,6 +283,7 @@ func cloneExecutionTraceStep(step trace.Step) trace.Step {
 		AppliedSurfaceIDs: append([]string(nil), step.AppliedSurfaceIDs...),
 		Input:             cloneExecutionTraceSnapshot(step.Input),
 		Output:            cloneExecutionTraceSnapshot(step.Output),
+		Usage:             cloneUsage(step.Usage),
 		Error:             step.Error,
 	}
 }
@@ -285,6 +293,18 @@ func cloneExecutionTraceSnapshot(snapshot *trace.Snapshot) *trace.Snapshot {
 		return nil
 	}
 	return &trace.Snapshot{Text: snapshot.Text}
+}
+
+func cloneUsage(usage *model.Usage) *model.Usage {
+	if usage == nil {
+		return nil
+	}
+	cloned := *usage
+	if usage.TimingInfo != nil {
+		timingInfo := *usage.TimingInfo
+		cloned.TimingInfo = &timingInfo
+	}
+	return &cloned
 }
 
 // Filter checks if the event matches the specified filter key.
